@@ -14,8 +14,10 @@ export async function onTransfer({ event, context }: Args<ContractEvent<typeof e
 export async function onTransaction({ event, context }: Args<EvmAccountEvent>) {
   const tx = event.transaction;
   const entry = { chain: context.chain.name, asset: "native", wallet: event.address, txHash: tx.hash, blockNumber: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000) };
+  let recipient = ""; // null for contract creations
+  if (tx.to) recipient = tx.to;
   if (tx.value > 0n && tx.status !== 0) {
-    if (event.direction !== "to") context.db.insert(ledger).values({ ...entry, kind: "native", direction: "out", amount: tx.value, counterparty: tx.to ?? "", logIndex: -1 });
+    if (event.direction !== "to") context.db.insert(ledger).values({ ...entry, kind: "native", direction: "out", amount: tx.value, counterparty: recipient, logIndex: -1 });
     if (event.direction !== "from") context.db.insert(ledger).values({ ...entry, kind: "native", direction: "in", amount: tx.value, counterparty: tx.from, logIndex: -1 });
   }
   if (event.direction !== "to" && tx.gasUsed !== undefined && tx.effectiveGasPrice !== undefined) {

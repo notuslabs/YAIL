@@ -5,8 +5,11 @@ import { erc20Abi } from "./src/abis.js";
 const START = { base: 30_000_000, polygon: 70_000_000, arbitrum: 350_000_000 };
 const evm = { base: { startBlock: START.base }, polygon: { startBlock: START.polygon }, arbitrum: { startBlock: START.arbitrum } };
 
+let clickhouseUrl = "http://default:yail@localhost:18123";
+if (process.env.CLICKHOUSE_URL) clickhouseUrl = process.env.CLICKHOUSE_URL;
+
 export default createConfig({
-  database: { url: process.env.CLICKHOUSE_URL ?? "http://default:yail@localhost:18123", database: "wallet_ledger" },
+  database: { url: clickhouseUrl, database: "wallet_ledger" },
   chains: {
     base: { id: 8453, source: hypersync({ url: "https://base.hypersync.xyz" }) },
     polygon: { id: 137, source: hypersync({ url: "https://polygon.hypersync.xyz" }) },

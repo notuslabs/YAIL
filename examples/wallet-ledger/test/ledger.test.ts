@@ -42,9 +42,11 @@ describe("wallet ledger", () => {
   it("USDC balance changes match the chain for every wallet", async () => {
     for (const wallet of usdcTruth.wallets) {
       const series = await balanceSeries(indexer.db, wallet);
-      const usdcBalance = series.filter((p) => p.asset === usdcTruth.token).at(-1)?.balance ?? 0n;
+      const usdcPoints = series.filter((p) => p.asset === usdcTruth.token);
+      const last = usdcPoints[usdcPoints.length - 1];
+      expect(last, wallet).toBeDefined();
       const { start, end } = usdcTruth.balances[wallet]!;
-      expect(usdcBalance, wallet).toBe(end - start);
+      expect(last!.balance, wallet).toBe(end - start);
     }
   });
 
