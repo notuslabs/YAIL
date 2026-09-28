@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import type { Indexer } from "../indexer/indexer.js";
 import { schemaDdl } from "../db/migrate.js";
-import { recordEvmFixture, recordBitcoinFixture, writeFixture } from "../sources/fixture.js";
+import { recordEvmFixture, recordBitcoinFixture, writeFixture, type Fixture } from "../sources/fixture.js";
+import { bigintReplacer } from "../util.js";
 import { buildBitcoinQuery, buildEvmQuery } from "../indexer/plan.js";
 
 const HELP = `yail <command> [options]
@@ -67,7 +68,7 @@ export async function run(argv: string[]): Promise<void> {
       if (!values.set) fail("--set is required");
       const addrs = more.filter((a) => !(a.endsWith(".ts") || a.endsWith(".js")));
       if (addrs.length === 0) fail("at least one address is required");
-      const rows = await indexer.addresses.register(addrs.map((address) => ({ set: values.set!, address, chain: values.chain, fromBlock: values["from-block"] ? Number(values["from-block"]) : undefined })));
+      const rows = await indexer.addresses.register(addrs.map((address) => ({ set: values.set!, address, chain: values.chain, fromBlock: optionalNumber(values["from-block"]) })));
       console.log(JSON.stringify(rows, bigintReplacer, 2));
       await indexer.stop();
       return;
@@ -112,8 +113,8 @@ export async function run(argv: string[]): Promise<void> {
       const indexer = await loadIndexer(entry);
       const rows = await indexer.reindex({
         chain: values.chain!,
-        fromBlock: values.from ? Number(values.from) : undefined,
-        toBlock: values.to ? Number(values.to) : undefined,
+        fromBlock: optionalNumber(values.from),
+        toBlock: optionalNumber(values.to),
         scope: values.scope,
         value: values.value,
       });
@@ -131,10 +132,12 @@ export async function run(argv: string[]): Promise<void> {
       const from = Number(values.from);
       const to = Number(values.to);
       const source = plan!.config.source;
-      const fixture =
-        plan!.kind === "evm"
-          ? await recordEvmFixture(source as any, buildEvmQuery(plan!, from, to, registry), { name: values.chain, chainId: Number(plan!.config.id) })
-          : await recordBitcoinFixture(source as any, buildBitcoinQuery(plan!, from, to, registry), { name: values.chain });
+      let fixture: Fixture;
+      if (plan!.kind === "evm") {
+        fixture = await recordEvmFixture(source as any, buildEvmQuery(plan!, from, to, registry), { name: values.chain, chainId: Number(plan!.config.id) });
+      } else {
+        fixture = await recordBitcoinFixture(source as any, buildBitcoinQuery(plan!, from, to, registry), { name: values.chain });
+      }
       writeFixture(resolve(values.out!), fixture);
       console.log(`wrote ${values.out}`);
       await indexer.stop();
@@ -159,7 +162,9 @@ function devLoop(entry?: string): void {
   let child: ReturnType<typeof spawn> | undefined;
   let timer: NodeJS.Timeout | undefined;
   const startChild = () => {
-    child = spawn(process.execPath, [process.argv[1]!, "start", ...(entry ? [entry] : [])], { stdio: "inherit", env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? "development" } });
+    const args = [process.argv[1]!, "start"];
+    if (entry) args.push(entry);
+    child = spawn(process.execPath, args, { stdio: "inherit", env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? "development" } });
     child.on("exit", (code) => {
       if (code !== null && code !== 0) console.error(`[yail dev] indexer exited with code ${code}, waiting for changes...`);
     });
@@ -185,6 +190,7 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-function bigintReplacer(_k: string, v: unknown): unknown {
-  return typeof v === "bigint" ? v.toString() : v;
+function optionalNumber(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  return Number(value);
 }

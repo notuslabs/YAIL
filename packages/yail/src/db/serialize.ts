@@ -1,6 +1,7 @@
 import type { Column } from "../schema/column.js";
 import { INDEX_META_COLUMNS, type Table } from "../schema/table.js";
 import { formatDateTime64 } from "./sql.js";
+import { bigintReplacer } from "../util.js";
 
 export interface RowMeta {
   chain?: string;
@@ -22,8 +23,12 @@ export function serializeRow(table: Table<any>, row: Record<string, unknown>, me
   }
   if (table.options.indexMeta !== false) {
     out[INDEX_META_COLUMNS.chain] = meta?.chain ?? "";
-    out[INDEX_META_COLUMNS.block] = meta?.block === undefined ? 0 : Number(meta.block);
-    out[INDEX_META_COLUMNS.version] = meta?.version === undefined ? "0" : meta.version.toString();
+    let block = 0;
+    if (meta?.block !== undefined) block = Number(meta.block);
+    let version = "0";
+    if (meta?.version !== undefined) version = meta.version.toString();
+    out[INDEX_META_COLUMNS.block] = block;
+    out[INDEX_META_COLUMNS.version] = version;
   }
   return out;
 }
@@ -37,21 +42,25 @@ export function serializeValue(col: Column, value: unknown, path: string): unkno
     case "string":
     case "hash":
       return String(value);
-    case "address":
-      return typeof value === "string" && value.startsWith("0x") ? value.toLowerCase() : String(value);
+    case "address": {
+      const text = String(value);
+      if (text.startsWith("0x")) return text.toLowerCase();
+      return text;
+    }
     case "bool":
       return Boolean(value);
     case "int":
     case "float":
-      return typeof value === "bigint" ? Number(value) : (value as number);
+      if (typeof value === "bigint") return Number(value);
+      return value as number;
     case "bigint": {
       if (typeof value === "bigint") return value.toString();
-      if (typeof value === "number") return Number.isInteger(value) ? String(value) : Math.trunc(value).toString();
+      if (typeof value === "number") return Math.trunc(value).toString();
       if (typeof value === "string") return BigInt(value).toString();
       throw new Error(`Column ${path}: expected bigint, got ${typeof value}`);
     }
     case "date": {
-      const d = value instanceof Date ? value : new Date(typeof value === "number" && value < 1e12 ? value * 1000 : (value as any));
+      const d = toDate(value);
       if (Number.isNaN(d.getTime())) throw new Error(`Column ${path}: invalid date ${String(value)}`);
       if (col.chType === "Date") return d.toISOString().slice(0, 10);
       if (col.chType.startsWith("DateTime64")) return formatDateTime64(d);
@@ -60,10 +69,17 @@ export function serializeValue(col: Column, value: unknown, path: string): unkno
     case "enum":
       return String(value);
     case "json":
-      return typeof value === "string" ? value : JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+      if (typeof value === "string") return value;
+      return JSON.stringify(value, bigintReplacer);
     case "array":
       return (value as unknown[]).map((v) => serializeValue(col.items!, v, path + "[]"));
   }
+}
+
+function toDate(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === "number" && value < 1e12) return new Date(value * 1000);
+  return new Date(value as string | number);
 }
 
 /** Parse a JSONEachRow row (with `date_time_output_format='iso'`) back into TS values. */
@@ -84,9 +100,10 @@ export function deserializeValue(col: Column, v: unknown): unknown {
       return BigInt(v as string | number);
     case "int":
     case "float":
-      return typeof v === "string" ? Number(v) : v;
+      return Number(v);
     case "bool":
-      return typeof v === "string" ? v === "true" || v === "1" : Boolean(v);
+      if (typeof v === "string") return v === "true" || v === "1";
+      return Boolean(v);
     case "date": {
       if (typeof v === "number") return new Date(v * 1000);
       const s = String(v);
@@ -96,7 +113,8 @@ export function deserializeValue(col: Column, v: unknown): unknown {
       return new Date(s.replace(" ", "T") + "Z");
     }
     case "json":
-      return typeof v === "string" ? JSON.parse(v) : v;
+      if (typeof v === "string") return JSON.parse(v);
+      return v;
     case "array":
       return (v as unknown[]).map((x) => deserializeValue(col.items!, x));
     default:

@@ -33,12 +33,10 @@ export function startTelemetry(options: TelemetryOptions = {}): { shutdown(): Pr
   const endpoint = (options.endpoint ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "http://localhost:4318").replace(/\/$/, "");
   const serviceName = options.serviceName ?? process.env.OTEL_SERVICE_NAME ?? "yail";
   const headers = options.headers ?? parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS);
+  const attributes: Record<string, string> = { [ATTR_SERVICE_NAME]: serviceName, ...(options.resourceAttributes ?? {}) };
+  if (options.serviceVersion) attributes[ATTR_SERVICE_VERSION] = options.serviceVersion;
   const sdk = new NodeSDK({
-    resource: resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: serviceName,
-      ...(options.serviceVersion ? { [ATTR_SERVICE_VERSION]: options.serviceVersion } : {}),
-      ...(options.resourceAttributes ?? {}),
-    }),
+    resource: resourceFromAttributes(attributes),
     traceExporter: new OTLPTraceExporter({ url: `${endpoint}/v1/traces`, headers }),
     metricReaders: [
       new PeriodicExportingMetricReader({

@@ -44,8 +44,10 @@ export function createCachedClient(options: CachedClientOptions): CachedClient {
     const data = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args as any });
     const blockNumber = params.blockNumber ?? options.currentBlock?.();
     const to = params.address.toLowerCase();
-    const block = blockNumber === undefined ? undefined : Number(blockNumber);
-    const key = block === undefined ? undefined : `${block}:${to}:${data}`;
+    let block: number | undefined;
+    if (blockNumber !== undefined) block = Number(blockNumber);
+    let key: string | undefined;
+    if (block !== undefined) key = `${block}:${to}:${data}`;
     let result: string | undefined;
     if (key && !params.noCache) {
       result = memory.get(key);
@@ -59,7 +61,9 @@ export function createCachedClient(options: CachedClientOptions): CachedClient {
       options.onCache?.(result !== undefined);
     }
     if (result === undefined) {
-      const res = await raw.call({ to: to as `0x${string}`, data, blockNumber: block === undefined ? undefined : BigInt(block) });
+      let blockTag: bigint | undefined;
+      if (block !== undefined) blockTag = BigInt(block);
+      const res = await raw.call({ to: to as `0x${string}`, data, blockNumber: blockTag });
       result = res.data ?? "0x";
       if (key && !params.noCache) {
         memory.set(key, result);

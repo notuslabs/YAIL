@@ -54,15 +54,14 @@ beforeAll(async () => {
 });
 
 function makeIndexer(database: ReturnType<TestClickHouse["database"]>, opts: { fixture: ReturnType<typeof buildFixture>; cacheSource?: boolean; withFactory?: boolean }) {
-  const contracts: Record<string, any> = {
-    Token: { abi: erc20, chain: "test", address: TOKEN, startBlock: 0, filter: [{ event: "Transfer", args: { from: addressSet("wallets") } }, { event: "Transfer", args: { to: addressSet("wallets") } }] },
-  };
-  if (opts.withFactory !== false) contracts.Pool = { abi: erc20, chain: "test", address: factory({ address: FACTORY, event: factoryAbi[0], parameter: "pool" }), startBlock: 0 };
   const config = createConfig({
     database,
     chains: { test: { id: 1337, source: fixtureSource(opts.fixture, { blocksPerBatch: 25 }), finality: 10, pollInterval: 10 } },
     addressSets: { wallets: { initial: [W1, W2] } },
-    contracts: contracts as { Token: (typeof contracts)["Token"]; Pool: (typeof contracts)["Pool"] },
+    contracts: {
+      Token: { abi: erc20, chain: "test", address: TOKEN, startBlock: 0, filter: [{ event: "Transfer", args: { from: addressSet("wallets") } }, { event: "Transfer", args: { to: addressSet("wallets") } }] },
+      Pool: { abi: erc20, chain: "test", address: factory({ address: FACTORY, event: factoryAbi[0], parameter: "pool" }), startBlock: 0 },
+    },
     accounts: { Wallets: { chain: "test", address: addressSet("wallets"), startBlock: 0 } },
     cache: { source: opts.cacheSource ?? false },
     server: { port: false },
@@ -72,18 +71,25 @@ function makeIndexer(database: ReturnType<TestClickHouse["database"]>, opts: { f
   const seen: string[] = [];
   indexer.on("Token:Transfer", async ({ event, context }) => {
     seen.push(`${event.block.number}:${event.log.logIndex}`);
+    let mode = "live";
+    if (context.backfill) mode = "backfill";
     const rows = [];
-    if (context.addresses.has("wallets", event.args.from)) rows.push({ chain: context.chain.name, wallet: event.args.from, token: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, delta: -event.args.value, block: BigInt(event.block.number), mode: context.backfill ? "backfill" : "live" });
-    if (context.addresses.has("wallets", event.args.to)) rows.push({ chain: context.chain.name, wallet: event.args.to, token: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, delta: event.args.value, block: BigInt(event.block.number), mode: context.backfill ? "backfill" : "live" });
+    if (context.addresses.has("wallets", event.args.from)) rows.push({ chain: context.chain.name, wallet: event.args.from, token: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, delta: -event.args.value, block: BigInt(event.block.number), mode });
+    if (context.addresses.has("wallets", event.args.to)) rows.push({ chain: context.chain.name, wallet: event.args.to, token: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, delta: event.args.value, block: BigInt(event.block.number), mode });
     context.db.insert(ledger).values(rows);
     context.log.set({ transfers: seen.length });
   });
   indexer.on("Wallets:transaction", async ({ event, context }) => {
-    context.db.insert(native).values({ chain: context.chain.name, wallet: event.address, txHash: event.transaction.hash, direction: event.direction, value: event.direction === "from" ? -event.transaction.value : event.transaction.value });
+    let value = event.transaction.value;
+    if (event.direction === "from") value = -value;
+    context.db.insert(native).values({ chain: context.chain.name, wallet: event.address, txHash: event.transaction.hash, direction: event.direction, value });
   });
-  indexer.on("Pool:Transfer", async ({ event, context }) => {
-    context.db.insert(poolEvents).values({ pool: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, value: event.args.value });
-  });
+  // A contract without handlers is not fetched at all, so leaving this out drops the factory from the plan.
+  if (opts.withFactory !== false) {
+    indexer.on("Pool:Transfer", async ({ event, context }) => {
+      context.db.insert(poolEvents).values({ pool: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, value: event.args.value });
+    });
+  }
   return { indexer, seen };
 }
 
@@ -180,7 +186,7 @@ describe("indexer end-to-end (synthetic fixture)", () => {
 
   it("serves the same data through the cached source wrapper", async () => {
     const db2 = ch.database();
-    // Cache keys include the address-set membership at query time, so the factory (whose children join the set mid-run) is left out here.
+    // Cache keys include the address-set membership at query time, so the factory (whose children join the set mid-run) is left out here (no Pool handler).
     const first = makeIndexer(db2, { fixture: buildFixture(), cacheSource: true, withFactory: false });
     await first.indexer.run();
     const cachedRows = await first.indexer.db.query<{ n: string }>(sql`SELECT count() AS n FROM ${internalTables.sourceCache}`);

@@ -9,6 +9,15 @@ export function addr(n: number): string {
   return `0x${n.toString(16).padStart(40, "0")}`;
 }
 
+function blockHash(n: number): string {
+  return keccak256(toHex(n));
+}
+
+function parentHashOf(n: number): string {
+  if (n === 0) return `0x${"0".repeat(64)}`;
+  return blockHash(n - 1);
+}
+
 export class FixtureBuilder {
   blocks: EvmBlock[] = [];
   transactions: EvmTransaction[] = [];
@@ -17,7 +26,7 @@ export class FixtureBuilder {
   private txIndexByBlock = new Map<number, number>();
 
   constructor(public readonly height: number, from = 0) {
-    for (let n = from; n <= height; n++) this.blocks.push({ number: n, hash: keccak256(toHex(n)), parentHash: n > 0 ? keccak256(toHex(n - 1)) : `0x${"0".repeat(64)}`, timestamp: 1_700_000_000 + n * 2 });
+    for (let n = from; n <= height; n++) this.blocks.push({ number: n, hash: blockHash(n), parentHash: parentHashOf(n), timestamp: 1_700_000_000 + n * 2 });
   }
 
   private nextLogIndex(block: number): number {

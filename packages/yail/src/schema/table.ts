@@ -1,6 +1,6 @@
 import type { Column } from "./column.js";
 
-export type Columns = Record<string, Column<any, boolean>>;
+export type Columns = Record<string, Column<any, boolean, boolean>>;
 
 export type TableEngine =
   | "MergeTree"
@@ -59,7 +59,7 @@ type OptionalKeys<C extends Columns> = {
 }[keyof C];
 type RequiredKeys<C extends Columns> = Exclude<keyof C, OptionalKeys<C>>;
 
-type ColType<Col> = Col extends Column<infer T, infer N> ? (N extends true ? T | null : T) : never;
+type ColType<Col> = Col extends Column<infer T, infer N, boolean> ? (N extends true ? T | null : T) : never;
 
 /** Row type accepted by `db.insert(table).values(row)`. */
 export type InsertRow<T extends Table<any>> = T extends Table<infer C>

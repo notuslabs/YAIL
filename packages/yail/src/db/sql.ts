@@ -83,7 +83,7 @@ export function renderSql(input: SqlFragment | string, options: RenderOptions = 
   const renderValue = (v: SqlFragment["values"][number]): string => {
     if (isSqlFragment(v)) return render(v);
     if (isRaw(v)) return v.text;
-    if (isTable(v)) return options.database ? `\`${options.database}\`.\`${v.name}\`` : `\`${v.name}\``;
+    if (isTable(v)) return qualify(v.name, options.database);
     if (options.inline) return literal(v as SqlValue);
     const name = next();
     const { type, value } = paramType(v as SqlValue);
@@ -99,11 +99,15 @@ function paramType(v: SqlValue): { type: string; value: unknown } {
   if (typeof v === "string") return { type: "String", value: v };
   if (typeof v === "boolean") return { type: "Bool", value: v };
   if (typeof v === "bigint") return { type: "Int256", value: v.toString() };
-  if (typeof v === "number") return Number.isInteger(v) ? { type: "Int64", value: v } : { type: "Float64", value: v };
+  if (typeof v === "number") {
+    if (Number.isInteger(v)) return { type: "Int64", value: v };
+    return { type: "Float64", value: v };
+  }
   if (v instanceof Date) return { type: "DateTime64(3)", value: formatDateTime64(v) };
   if (Array.isArray(v)) {
     const first = v.find((x) => x !== null && x !== undefined);
-    const inner = first === undefined ? "String" : paramType(first as SqlValue).type;
+    let inner = "String";
+    if (first !== undefined) inner = paramType(first as SqlValue).type;
     return { type: `Array(${inner})`, value: v.map((x) => paramType(x as SqlValue).value) };
   }
   throw new Error(`Unsupported SQL parameter: ${String(v)}`);
@@ -112,12 +116,21 @@ function paramType(v: SqlValue): { type: string; value: unknown } {
 export function literal(v: SqlValue): string {
   if (v === null || v === undefined) return "NULL";
   if (typeof v === "string") return `'${v.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "boolean") return String(v);
   if (typeof v === "bigint") return v.toString();
-  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "NULL";
+  if (typeof v === "number") {
+    if (Number.isFinite(v)) return String(v);
+    return "NULL";
+  }
   if (v instanceof Date) return `'${formatDateTime64(v)}'`;
   if (Array.isArray(v)) return `[${v.map((x) => literal(x as SqlValue)).join(", ")}]`;
   throw new Error(`Unsupported SQL literal: ${String(v)}`);
+}
+
+/** Backtick-quote a table name, optionally qualified with its database. */
+export function qualify(name: string, database?: string): string {
+  if (database) return `\`${database}\`.\`${name}\``;
+  return `\`${name}\``;
 }
 
 export function formatDateTime64(d: Date): string {

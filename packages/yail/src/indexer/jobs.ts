@@ -138,10 +138,11 @@ export class JobRunner {
       wide.set({ outcome: "done" });
     } catch (err) {
       const retry = job.attempts < 3;
-      job.status = retry ? "pending" : "failed";
+      job.status = "failed";
+      if (retry) job.status = "pending";
       job.error = (err as Error).message;
       await update({ status: job.status, error: job.error });
-      obs.metrics.recordJob(job.kind, retry ? "done" : "failed");
+      if (!retry) obs.metrics.recordJob(job.kind, "failed");
       obs.metrics.recordError(this.chain, "job");
       wide.error(err as Error);
       wide.set({ outcome: job.status, attempts: job.attempts });
@@ -173,11 +174,13 @@ export class JobRunner {
   }
 
   private async reindexScope(p: ReindexScopePayload): Promise<void> {
-    const value = p.value.startsWith("0x") ? p.value.toLowerCase() : p.value;
+    let value = p.value;
+    if (value.startsWith("0x")) value = value.toLowerCase();
     for (const t of this.deps.tables) {
       const col = t.options.scopes?.[p.scope];
       if (!col) continue;
-      const cond = t.options.indexMeta === false ? sql`` : sql` AND ${sql.identifier(INDEX_META_COLUMNS.chain)} = ${this.chain}`;
+      let cond = sql``;
+      if (t.options.indexMeta !== false) cond = sql` AND ${sql.identifier(INDEX_META_COLUMNS.chain)} = ${this.chain}`;
       await this.deps.db.command(sql`DELETE FROM ${t} WHERE ${sql.identifier(t.columnName(col))} = ${value}${cond}`);
     }
     // Re-run history for every set the value belongs to on this chain.

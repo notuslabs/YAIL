@@ -1,5 +1,7 @@
 import type { AccountConfig, ChainConfig, Config, ContractConfig } from "./types.js";
 import { isAddressSet, isFactory } from "./address.js";
+import { chainNames } from "./chain-ref.js";
+import { toArray } from "../util.js";
 
 /**
  * Define the indexer configuration. Returns the object unchanged; the
@@ -17,16 +19,15 @@ export function createConfig<
 
 export function validateConfig(config: Config<any, any, any>): void {
   if (!config.database?.url) throw new Error("config.database.url is required");
-  const chainNames = Object.keys(config.chains ?? {});
-  if (chainNames.length === 0) throw new Error("config.chains must define at least one chain");
+  const configuredChains = Object.keys(config.chains ?? {});
+  if (configuredChains.length === 0) throw new Error("config.chains must define at least one chain");
   for (const [name, chain] of Object.entries(config.chains) as Array<[string, ChainConfig]>) {
     if (!chain.source) throw new Error(`chain "${name}": source is required`);
     if (chain.id === undefined) throw new Error(`chain "${name}": id is required`);
   }
   const sets = new Set(Object.keys(config.addressSets ?? {}));
   const checkChainRef = (owner: string, ref: string | Record<string, unknown>) => {
-    const names = typeof ref === "string" ? [ref] : Object.keys(ref);
-    for (const n of names) if (!config.chains[n]) throw new Error(`${owner}: unknown chain "${n}"`);
+    for (const n of chainNames(ref)) if (!config.chains[n]) throw new Error(`${owner}: unknown chain "${n}"`);
   };
   const checkAddress = (owner: string, spec: unknown) => {
     if (spec === undefined) return;
@@ -35,8 +36,7 @@ export function validateConfig(config: Config<any, any, any>): void {
       return;
     }
     if (isFactory(spec)) return;
-    const list = Array.isArray(spec) ? spec : [spec];
-    for (const a of list) {
+    for (const a of toArray<unknown>(spec)) {
       if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) throw new Error(`${owner}: invalid EVM address "${String(a)}"`);
     }
   };
@@ -45,7 +45,7 @@ export function validateConfig(config: Config<any, any, any>): void {
     checkChainRef(`contract "${name}"`, c.chain as any);
     checkAddress(`contract "${name}"`, c.address);
     if (typeof c.chain !== "string") for (const [cn, o] of Object.entries(c.chain)) checkAddress(`contract "${name}" on ${cn}`, o.address);
-    const filters = c.filter ? (Array.isArray(c.filter) ? c.filter : [c.filter]) : [];
+    const filters = toArray(c.filter ?? []);
     for (const f of filters) {
       const ev = c.abi.find((x: any) => x.type === "event" && x.name === f.event);
       if (!ev) throw new Error(`contract "${name}": filter references unknown event "${f.event}"`);
@@ -63,8 +63,7 @@ export function validateConfig(config: Config<any, any, any>): void {
     if (a.address === undefined) throw new Error(`account "${name}": address is required`);
     if (isFactory(a.address)) throw new Error(`account "${name}": factory() is not supported for accounts`);
     if (!isAddressSet(a.address)) {
-      const chains = typeof a.chain === "string" ? [a.chain] : Object.keys(a.chain);
-      const evm = chains.every((cn) => config.chains[cn].source.kind === "evm");
+      const evm = chainNames(a.chain).every((cn) => config.chains[cn].source.kind === "evm");
       if (evm) checkAddress(`account "${name}"`, a.address);
     }
   }

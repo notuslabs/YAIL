@@ -1,26 +1,21 @@
 import { createIndexer } from "yail";
 import config from "../yail.config.js";
-import * as schema from "./schema.js";
-import { transfers, watched } from "./schema.js";
+import { transfers } from "./schema.js";
 
-export const indexer = createIndexer({ config, schema });
+export const indexer = createIndexer({ config, schema: { transfers } });
 
 indexer.on("Usdc:Transfer", async ({ event, context }) => {
-  context.db.insert(transfers).values({
+  const { from, to, value } = event.args;
+  const entry = {
+    counterparty: from,
+    amount: value,
     txHash: event.log.transactionHash,
     logIndex: event.log.logIndex,
-    from: event.args.from,
-    to: event.args.to,
-    amount: event.args.value,
     blockNumber: BigInt(event.block.number),
     blockTime: new Date(event.block.timestamp * 1000),
-  });
-});
-
-indexer.on("WatchedUsdc:Transfer", async ({ event, context }) => {
-  const base = { txHash: event.log.transactionHash, logIndex: event.log.logIndex, amount: event.args.value, blockNumber: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000), backfilled: context.backfill };
-  if (context.addresses.has("watched", event.args.from)) context.db.insert(watched).values({ ...base, wallet: event.args.from, direction: "out", counterparty: event.args.to });
-  if (context.addresses.has("watched", event.args.to)) context.db.insert(watched).values({ ...base, wallet: event.args.to, direction: "in", counterparty: event.args.from });
+  };
+  if (context.addresses.has("watched", from)) context.db.insert(transfers).values({ ...entry, wallet: from, direction: "out", counterparty: to });
+  if (context.addresses.has("watched", to)) context.db.insert(transfers).values({ ...entry, wallet: to, direction: "in" });
 });
 
 export default indexer;

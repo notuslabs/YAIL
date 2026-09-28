@@ -4,6 +4,8 @@ import { factorySetName, isAddressSet, isFactory, type FactoryRef } from "../con
 import type { AddressRegistry } from "../addresses/registry.js";
 import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTxFilter } from "../sources/types.js";
 import { abiEvents, compileFilter, eventTopic, padAddress, type CompiledEvent, type CompiledFilter } from "./events.js";
+import { perChain } from "../config/chain-ref.js";
+import { toArray } from "../util.js";
 
 export interface ContractSource {
   kind: "contract";
@@ -54,18 +56,20 @@ export function buildPlans(config: Config<any, any, any>, options: PlanOptions):
   for (const [chain, cfg] of Object.entries(config.chains as Record<string, ChainConfig>)) {
     plans.set(chain, { chain, config: cfg, kind: cfg.source.kind, contracts: [], accounts: [], startBlock: Number.MAX_SAFE_INTEGER, sets: new Map() });
   }
-  const resolveBlock = (chain: string, v: number | "latest" | undefined, fallback: number): number => (v === "latest" ? options.resolveLatest(chain) : (v ?? fallback));
+  const resolveBlock = (chain: string, v: number | "latest" | undefined, fallback: number): number => {
+    if (v === "latest") return options.resolveLatest(chain);
+    return v ?? fallback;
+  };
 
   for (const [name, c] of Object.entries((config.contracts ?? {}) as Record<string, ContractConfig>)) {
-    const perChain = typeof c.chain === "string" ? { [c.chain]: {} } : c.chain;
-    for (const [chain, override] of Object.entries(perChain)) {
+    for (const [chain, override] of Object.entries(perChain(c.chain))) {
       const plan = plans.get(chain)!;
       if (plan.kind !== "evm") throw new Error(`contract "${name}": chain "${chain}" is not an EVM chain`);
       const events = abiEvents(c.abi)
         .filter((e) => options.handled.has(`${name}:${e.name}`))
         .map((e) => ({ name: e.name, abi: e, topic0: eventTopic(e) }));
       const rawFilters = override.filter ?? c.filter;
-      const filters = (rawFilters ? (Array.isArray(rawFilters) ? rawFilters : [rawFilters]) : []).map((f) => compileFilter(c.abi, f));
+      const filters = toArray(rawFilters ?? []).map((f) => compileFilter(c.abi, f));
       const address = override.address ?? c.address;
       const startBlock = resolveBlock(chain, override.startBlock ?? c.startBlock, 0);
       const endBlock = override.endBlock ?? c.endBlock;
@@ -84,8 +88,7 @@ export function buildPlans(config: Config<any, any, any>, options: PlanOptions):
 
   for (const [name, a] of Object.entries((config.accounts ?? {}) as Record<string, AccountConfig>)) {
     if (!options.handled.has(`${name}:transaction`)) continue;
-    const perChain = typeof a.chain === "string" ? { [a.chain]: {} } : a.chain;
-    for (const [chain, override] of Object.entries(perChain)) {
+    for (const [chain, override] of Object.entries(perChain(a.chain))) {
       const plan = plans.get(chain)!;
       const address = override.address ?? a.address;
       const startBlock = resolveBlock(chain, override.startBlock ?? a.startBlock, 0);
@@ -119,8 +122,10 @@ function mergeEnd(plan: ChainPlan, end: number | undefined): number | undefined 
 export function nextBoundary(plan: ChainPlan, from: number): number | undefined {
   let next: number | undefined;
   for (const s of [...plan.contracts, ...plan.accounts]) {
-    for (const b of [s.startBlock, s.endBlock === undefined ? undefined : s.endBlock + 1]) {
-      if (b !== undefined && b > from && (next === undefined || b < next)) next = b;
+    const boundaries = [s.startBlock];
+    if (s.endBlock !== undefined) boundaries.push(s.endBlock + 1);
+    for (const b of boundaries) {
+      if (b > from && (next === undefined || b < next)) next = b;
     }
   }
   return next;
@@ -180,14 +185,15 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
 
     // Factory contract's own creation event (live mode only).
     if (c.factory && !override) {
-      const factoryAddrs = (Array.isArray(c.factory.ref.address) ? c.factory.ref.address : [c.factory.ref.address]).map((a) => a.toLowerCase());
+      const factoryAddrs = toArray(c.factory.ref.address).map((a) => a.toLowerCase());
       logs.push({ address: factoryAddrs, topics: [[c.factory.topic0]] });
     }
     if (c.events.length === 0) continue;
     const topic0s = c.events.map((e) => e.topic0);
     const resolved = resolveAddresses(c.address, plan.chain, registry, override);
     if (!resolved.any && resolved.addresses.length === 0) continue; // empty dynamic set: nothing to fetch yet
-    const addressChunks = resolved.any ? [undefined] : chunkList(resolved.addresses, chunk);
+    let addressChunks: Array<string[] | undefined> = [undefined];
+    if (!resolved.any) addressChunks = chunkList(resolved.addresses, chunk);
 
     if (c.filters.length === 0) {
       for (const addrs of addressChunks) logs.push({ address: addrs, topics: [topic0s] });
@@ -200,7 +206,8 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
       let empty = false;
       for (const t of f.topics) {
         if (t.set !== undefined) {
-          const members = override && override.set === t.set ? override.addresses : registry.live(t.set, plan.chain);
+          let members = registry.live(t.set, plan.chain);
+          if (override && override.set === t.set) members = override.addresses;
           if (members.length === 0) {
             empty = true;
             break;

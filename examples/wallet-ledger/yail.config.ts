@@ -1,39 +1,23 @@
-import { addressSet, createConfig, esplora, hypersync, type ChainConfig } from "yail";
+import { addressSet, createConfig, esplora, hypersync } from "yail";
 import { erc20Abi } from "./src/abis.js";
 
-const token = process.env.ENVIO_API_TOKEN;
+// Nothing before these blocks is indexed. ENVIO_API_TOKEN is read from the environment.
+const START = { base: 30_000_000, polygon: 70_000_000, arbitrum: 350_000_000 };
+const evm = { base: { startBlock: START.base }, polygon: { startBlock: START.polygon }, arbitrum: { startBlock: START.arbitrum } };
 
-const evm = (name: string, id: number): ChainConfig => ({
-  id,
-  source: hypersync({ url: `https://${name}.hypersync.xyz`, apiToken: token }),
-  rpc: process.env[`${name.toUpperCase()}_RPC_URL`],
-  finality: 30,
-});
-const startBlocks = {
-  base: Number(process.env.BASE_START_BLOCK ?? 30_000_000),
-  polygon: Number(process.env.POLYGON_START_BLOCK ?? 70_000_000),
-  arbitrum: Number(process.env.ARBITRUM_START_BLOCK ?? 350_000_000),
-};
-
-/**
- * The production configuration: EVM chains through HyperSync, Bitcoin through
- * Esplora. Wallets are registered at runtime (`yail addresses add`, POST /addresses
- * or `indexer.addresses.register`) into the `wallets` / `btcWallets` sets and
- * backfilled from each chain's startBlock.
- */
 export default createConfig({
-  database: { url: process.env.CLICKHOUSE_URL ?? "http://default:@localhost:8123", database: process.env.CLICKHOUSE_DATABASE ?? "wallet_ledger" },
+  database: { url: process.env.CLICKHOUSE_URL ?? "http://default:yail@localhost:18123", database: "wallet_ledger" },
   chains: {
-    base: evm("base", 8453),
-    polygon: evm("polygon", 137),
-    arbitrum: evm("arbitrum", 42161),
-    bitcoin: { id: "bitcoin", source: esplora({ url: process.env.ESPLORA_URL ?? "https://mempool.space/api" }), finality: 3, pollInterval: 60_000 },
+    base: { id: 8453, source: hypersync({ url: "https://base.hypersync.xyz" }) },
+    polygon: { id: 137, source: hypersync({ url: "https://polygon.hypersync.xyz" }) },
+    arbitrum: { id: 42161, source: hypersync({ url: "https://arbitrum.hypersync.xyz" }) },
+    bitcoin: { id: "bitcoin", source: esplora({ url: "https://mempool.space/api" }) },
   },
   contracts: {
-    // No `address`: every ERC-20 on the chain. The topic filter keeps it to transfers touching a registered wallet.
+    // Every ERC-20 (no address), but only transfers that touch a registered wallet cross the wire.
     Erc20: {
       abi: erc20Abi,
-      chain: { base: { startBlock: startBlocks.base }, polygon: { startBlock: startBlocks.polygon }, arbitrum: { startBlock: startBlocks.arbitrum } },
+      chain: evm,
       filter: [
         { event: "Transfer", args: { from: addressSet("wallets") } },
         { event: "Transfer", args: { to: addressSet("wallets") } },
@@ -41,14 +25,8 @@ export default createConfig({
     },
   },
   accounts: {
-    // Native coin movements + gas of the registered wallets.
-    Wallets: {
-      address: addressSet("wallets"),
-      chain: { base: { startBlock: startBlocks.base }, polygon: { startBlock: startBlocks.polygon }, arbitrum: { startBlock: startBlocks.arbitrum } },
-    },
-    BtcWallets: { chain: "bitcoin", address: addressSet("btcWallets"), startBlock: Number(process.env.BITCOIN_START_BLOCK ?? 800_000) },
+    // Native coin movements and gas of the registered wallets.
+    Wallets: { chain: evm, address: addressSet("wallets") },
+    BtcWallets: { chain: "bitcoin", address: addressSet("btcWallets"), startBlock: 800_000 },
   },
-  cache: { source: false, http: true, rpc: true },
-  observability: { serviceName: "wallet-ledger", logsToClickHouse: true },
-  server: { port: Number(process.env.PORT ?? 42069) },
 });

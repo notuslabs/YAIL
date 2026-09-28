@@ -2,6 +2,7 @@ import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type Ab
 import type { Config, EventFilter } from "../config/types.js";
 import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTransaction } from "../sources/types.js";
 import { isAddressSet } from "../config/address.js";
+import { toArray } from "../util.js";
 
 // ------------------------------------------------------------ type level
 
@@ -119,8 +120,7 @@ export function compileFilter(abi: Abi, filter: EventFilter): CompiledFilter {
       if (input.type !== "address") throw new Error(`filter: ${filter.event}.${name} must be an address to use addressSet()`);
       topics.push({ index: idx + 1, set: value.set });
     } else {
-      const list = Array.isArray(value) ? value : [value];
-      topics.push({ index: idx + 1, values: list.map((v) => encodeTopicValue(input.type, v as any)) });
+      topics.push({ index: idx + 1, values: toArray(value).map((v) => encodeTopicValue(input.type, v)) });
     }
   }
   return { event, topic0: eventTopic(event), topics };

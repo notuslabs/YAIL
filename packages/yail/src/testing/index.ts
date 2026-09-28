@@ -36,7 +36,9 @@ export function startTestClickHouse(options: { image?: string } = {}): Promise<T
 
 function make(url: string, stop: () => Promise<void>): TestClickHouse {
   const u = new URL(url);
-  const base = `${u.protocol}//${u.username ? `${u.username}:${u.password}@` : ""}${u.host}`;
+  let auth = "";
+  if (u.username) auth = `${u.username}:${u.password}@`;
+  const base = `${u.protocol}//${auth}${u.host}`;
   return {
     url: base,
     database(config) {

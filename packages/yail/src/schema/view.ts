@@ -1,5 +1,6 @@
 import type { Table } from "./table.js";
 import type { SqlFragment } from "../db/sql.js";
+import { toArray } from "../util.js";
 
 export interface MaterializedView {
   readonly __brand: "yail.materializedView";
@@ -22,7 +23,7 @@ export function materializedView(
     name,
     to: def.to,
     query: def.query,
-    from: Array.isArray(def.from) ? (def.from as ReadonlyArray<Table<any>>) : [def.from as Table<any>],
+    from: toArray<Table<any>>(def.from),
   };
 }
 

@@ -59,8 +59,11 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
 
   async function run(url: string, init: HttpRequestInit = {}): Promise<HttpResponse> {
     const { cache, cacheKey, ...reqInit } = init;
-    const ttl = cache === true ? Infinity : typeof cache === "number" ? cache : 0;
-    const key = ttl > 0 ? hashRequest(url, reqInit, cacheKey) : undefined;
+    let ttl = 0;
+    if (cache === true) ttl = Infinity;
+    else if (typeof cache === "number") ttl = cache;
+    let key: string | undefined;
+    if (ttl > 0) key = hashRequest(url, reqInit, cacheKey);
     const now = Date.now();
     if (key) {
       const m = memory.get(key);
@@ -82,7 +85,8 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
     }
     const res = await fetchWithRetry(url, reqInit);
     if (key && res.ok) {
-      const expiresAt = ttl === Infinity ? new Date("2200-01-01T00:00:00Z").getTime() : now + ttl;
+      let expiresAt = now + ttl;
+      if (ttl === Infinity) expiresAt = new Date("2200-01-01T00:00:00Z").getTime();
       remember(key, res, expiresAt);
       if (persist) {
         await options.db!.insert(httpCache).values({
@@ -128,9 +132,14 @@ export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
         ...init,
         method: "POST",
         headers: { "content-type": "application/json", ...(init?.headers as Record<string, string> | undefined) },
-        body: typeof body === "string" ? body : JSON.stringify(body),
+        body: toBody(body),
       }),
   };
+}
+
+function toBody(body: unknown): string {
+  if (typeof body === "string") return body;
+  return JSON.stringify(body);
 }
 
 function toResponse(status: number, headers: Record<string, string>, body: string, cached: boolean): HttpResponse {
@@ -149,7 +158,7 @@ function toResponse(status: number, headers: Record<string, string>, body: strin
 function hashRequest(url: string, init: RequestInit, extra?: string): string {
   const h = createHash("sha256");
   h.update(init.method ?? "GET").update("\n").update(url).update("\n");
-  if (init.body) h.update(typeof init.body === "string" ? init.body : JSON.stringify(init.body));
+  if (init.body) h.update(toBody(init.body));
   if (extra) h.update("\n").update(extra);
   return h.digest("hex").slice(0, 40);
 }

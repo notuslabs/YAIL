@@ -19,6 +19,13 @@ export interface ChainStats {
   caughtUp: boolean;
 }
 
+type CounterName = keyof Metrics["counters"];
+const CACHE_COUNTERS: Record<"source" | "http" | "rpc", [CounterName, CounterName]> = {
+  source: ["cacheHits", "cacheMisses"],
+  http: ["httpCacheHits", "httpCacheMisses"],
+  rpc: ["rpcCacheHits", "rpcCacheMisses"],
+};
+
 export class Metrics {
   readonly meter: Meter;
   readonly tracer: Tracer;
@@ -61,7 +68,7 @@ export class Metrics {
       for (const [chain, s] of this.chains) r.observe(s.lagBlocks, { chain });
     });
     m.createObservableGauge("yail.chain.caught_up", { description: "1 when the chain is at the finalized head" }).addCallback((r) => {
-      for (const [chain, s] of this.chains) r.observe(s.caughtUp ? 1 : 0, { chain });
+      for (const [chain, s] of this.chains) r.observe(Number(s.caughtUp), { chain });
     });
   }
 
@@ -112,14 +119,20 @@ export class Metrics {
   }
 
   recordCache(cache: "source" | "http" | "rpc", hit: boolean): void {
-    if (cache === "source") hit ? this.counters.cacheHits++ : this.counters.cacheMisses++;
-    if (cache === "http") hit ? this.counters.httpCacheHits++ : this.counters.httpCacheMisses++;
-    if (cache === "rpc") hit ? this.counters.rpcCacheHits++ : this.counters.rpcCacheMisses++;
-    this.cacheEvents.add(1, { cache, result: hit ? "hit" : "miss" });
+    const [hitCounter, missCounter] = CACHE_COUNTERS[cache];
+    let result = "miss";
+    let counter = missCounter;
+    if (hit) {
+      result = "hit";
+      counter = hitCounter;
+    }
+    this.counters[counter]++;
+    this.cacheEvents.add(1, { cache, result });
   }
 
   recordJob(kind: string, outcome: "done" | "failed"): void {
-    outcome === "done" ? this.counters.jobsDone++ : this.counters.jobsFailed++;
+    if (outcome === "done") this.counters.jobsDone++;
+    else this.counters.jobsFailed++;
     this.jobEvents.add(1, { kind, outcome });
   }
 

@@ -15,6 +15,8 @@ import type { Config } from "../config/types.js";
 import { createContext, type HandlerContext } from "./context.js";
 import { bitcoinAccountEvent, decodeLog, logMatchesFilter, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent } from "./events.js";
 import { buildBitcoinQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
+import type { BitcoinQuery, EvmQuery } from "../sources/types.js";
+import { toArray } from "../util.js";
 
 export type Handler = (args: { event: any; context: HandlerContext<any, any> }) => Promise<void> | void;
 
@@ -74,21 +76,20 @@ export class ChainRunner {
     readonly plan: ChainPlan,
   ) {
     const cfg = plan.config;
-    const isBtc = plan.kind === "bitcoin";
-    this.finality = cfg.finality ?? (isBtc ? 3 : 20);
-    this.pollInterval = cfg.pollInterval ?? (isBtc ? 30_000 : 2_000);
-    this.maxBlockRange = cfg.maxBlockRange ?? (isBtc ? 50_000 : cfg.source.name.startsWith("rpc") ? 2_000 : 100_000);
-    this.client =
-      plan.kind === "evm" && cfg.rpc
-        ? createCachedClient({
-            chain: plan.chain,
-            url: cfg.rpc,
-            db: deps.db,
-            persist: deps.config.cache?.rpc !== false,
-            onCache: (hit) => deps.obs.metrics.recordCache("rpc", hit),
-            currentBlock: () => this.currentBlock,
-          })
-        : undefined;
+    const defaults = chainDefaults(plan);
+    this.finality = cfg.finality ?? defaults.finality;
+    this.pollInterval = cfg.pollInterval ?? defaults.pollInterval;
+    this.maxBlockRange = cfg.maxBlockRange ?? defaults.maxBlockRange;
+    if (plan.kind === "evm" && cfg.rpc) {
+      this.client = createCachedClient({
+        chain: plan.chain,
+        url: cfg.rpc,
+        db: deps.db,
+        persist: deps.config.cache?.rpc !== false,
+        onCache: (hit) => deps.obs.metrics.recordCache("rpc", hit),
+        currentBlock: () => this.currentBlock,
+      });
+    }
   }
 
   private currentBlock: number | undefined;
@@ -100,13 +101,17 @@ export class ChainRunner {
   async init(): Promise<void> {
     const rows = await this.deps.db.rows(checkpoints, sql`WHERE chain = ${this.chain} LIMIT 1`);
     const cp = rows[0];
-    this.cursor = cp ? Math.max(Number(cp.cursor), this.plan.startBlock) : this.plan.startBlock;
-    this.head = cp ? Number(cp.head) : 0;
+    this.cursor = this.plan.startBlock;
+    this.head = 0;
+    if (cp) {
+      this.cursor = Math.max(Number(cp.cursor), this.plan.startBlock);
+      this.head = Number(cp.head);
+    }
     // Seed configured address sets.
     for (const [set, def] of Object.entries(this.deps.config.addressSets ?? {})) {
       if (!this.plan.sets.has(set)) continue;
       for (const item of def.initial ?? []) {
-        const spec = typeof item === "string" ? { address: item } : item;
+        const spec = seedSpec(item);
         if (spec.chain && spec.chain !== this.chain) continue;
         await this.deps.registry.register({ set, chain: this.chain, address: spec.address, fromBlock: spec.fromBlock ?? this.plan.sets.get(set) ?? 0 });
       }
@@ -237,12 +242,17 @@ export class ChainRunner {
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;
 
-    const query = this.plan.kind === "evm"
-      ? buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk })
-      : buildBitcoinQuery(this.plan, from, to, this.deps.registry, { override: options.override });
-    const empty = this.plan.kind === "evm"
-      ? (query as any).logs.length === 0 && (query as any).transactions.length === 0
-      : (query as any).addresses.length === 0;
+    let query: EvmQuery | BitcoinQuery;
+    let empty: boolean;
+    if (this.plan.kind === "evm") {
+      const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
+      query = q;
+      empty = q.logs.length === 0 && q.transactions.length === 0;
+    } else {
+      const q = buildBitcoinQuery(this.plan, from, to, this.deps.registry, { override: options.override });
+      query = q;
+      empty = q.addresses.length === 0;
+    }
     if (empty) {
       if (live) await this.advance(to);
       return stats;
@@ -257,7 +267,7 @@ export class ChainRunner {
       if (next.done) break;
       const batch = next.value as EvmBatch | BitcoinBatch;
       const started = performance.now();
-      const wide = this.deps.obs.wide({ chain: this.chain, mode: options.label ?? (live ? "live" : "backfill"), fromBlock: batch.fromBlock, toBlock: batch.nextBlock - 1 });
+      const wide = this.deps.obs.wide({ chain: this.chain, mode: options.label ?? modeLabel(live), fromBlock: batch.fromBlock, toBlock: batch.nextBlock - 1 });
       const writer = new BatchWriter(this.deps.db, { maxRows: flushMaxRows, onFlush: (s) => metrics.recordFlush(s.table, s.rows, s.ms) });
       const meta = { current: { chain: this.chain, block: batch.fromBlock, version: 0n } as RowMeta };
       const context = this.makeContext(writer, meta, wide, options.backfill);
@@ -281,7 +291,9 @@ export class ChainRunner {
         wide.error(err as Error);
         wide.set({ events: eventCount });
         wide.emit();
-        metrics.recordError(this.chain, live ? "batch" : "backfill");
+        let stage = "backfill";
+        if (live) stage = "batch";
+        metrics.recordError(this.chain, stage);
         throw err;
       }
       const ms = performance.now() - started;
@@ -349,7 +361,7 @@ export class ChainRunner {
     if (factories.length === 0) return;
     for (const c of factories) {
       const f = c.factory!;
-      const addrs = new Set((Array.isArray(f.ref.address) ? f.ref.address : [f.ref.address]).map((a) => a.toLowerCase()));
+      const addrs = new Set(toArray(f.ref.address).map((a) => a.toLowerCase()));
       const discovered: Array<{ address: string; block: number }> = [];
       for (const log of batch.logs) {
         if (!addrs.has(log.address) || (log.topics[0] ?? "").toLowerCase() !== f.topic0) continue;
@@ -408,8 +420,10 @@ export class ChainRunner {
     const blocks = new Map(batch.blocks.map((b) => [b.number, b]));
     const txs = new Map(batch.transactions.map((t) => [t.hash, t]));
     const events: DispatchEvent[] = [];
-    const inSet = (set: string, address: string) =>
-      override && override.set === set ? override.addresses.includes(address) : this.deps.registry.has(set, this.chain, address);
+    const inSet = (set: string, address: string) => {
+      if (override && override.set === set) return override.addresses.includes(address);
+      return this.deps.registry.has(set, this.chain, address);
+    };
 
     for (const log of batch.logs) {
       const topic0 = (log.topics[0] ?? "").toLowerCase();
@@ -428,7 +442,8 @@ export class ChainRunner {
           continue;
         }
         const block = await this.blockOf(blocks, log.blockNumber);
-        const payload: ContractEvent = { name: ev.name, args: decoded.args as any, address: log.address, log, block, transaction: c.includeTransactions ? txs.get(log.transactionHash) : undefined };
+        const payload: ContractEvent = { name: ev.name, args: decoded.args as any, address: log.address, log, block };
+        if (c.includeTransactions) payload.transaction = txs.get(log.transactionHash);
         events.push({ block: log.blockNumber, txIndex: log.transactionIndex, logIndex: log.logIndex + 1, name, payload });
       }
     }
@@ -527,6 +542,23 @@ export class ChainRunner {
     this.currentBlock = undefined;
     return count;
   }
+}
+
+function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: number; maxBlockRange: number } {
+  if (plan.kind === "bitcoin") return { finality: 3, pollInterval: 30_000, maxBlockRange: 50_000 };
+  if (plan.config.source.name.startsWith("rpc")) return { finality: 20, pollInterval: 2_000, maxBlockRange: 2_000 };
+  return { finality: 20, pollInterval: 2_000, maxBlockRange: 100_000 };
+}
+
+type Seed = { address: string; chain?: string; fromBlock?: number };
+function seedSpec(item: string | Seed): Seed {
+  if (typeof item === "string") return { address: item };
+  return item;
+}
+
+function modeLabel(live: boolean): string {
+  if (live) return "live";
+  return "backfill";
 }
 
 function describeEvent(e: DispatchEvent): Record<string, unknown> {

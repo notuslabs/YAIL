@@ -1,6 +1,12 @@
-import "./telemetry.js";
+import { createIndexer } from "yail";
 import config from "../yail.config.js";
-import { createLedgerIndexer } from "./indexer.js";
+import { onBitcoinTransaction, onTransaction, onTransfer } from "./handlers.js";
+import * as schema from "./schema.js";
 
-export const indexer = createLedgerIndexer(config);
+export const indexer = createIndexer({ config, schema });
+
+indexer.on("Erc20:Transfer", onTransfer);
+indexer.on("Wallets:transaction", onTransaction);
+indexer.on("BtcWallets:transaction", onBitcoinTransaction);
+
 export default indexer;

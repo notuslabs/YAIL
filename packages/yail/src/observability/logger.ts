@@ -5,6 +5,7 @@ import { createClickHouseDrain } from "evlog/clickhouse";
 import type { DatabaseConfig, Db } from "../db/client.js";
 import type { ObservabilityConfig } from "../config/types.js";
 import { Metrics } from "./metrics.js";
+import { decodeOr } from "../util.js";
 
 export type Log = typeof evlog;
 export type WideLogger = RequestLogger;
@@ -49,8 +50,8 @@ export async function initObservability(config: ObservabilityConfig = {}, deps: 
   if (config.logsToClickHouse && deps.db && deps.dbConfig) {
     await deps.db.command(LOGS_TABLE_DDL.replace("{db}", `\`${deps.db.database}\``));
     const u = new URL(deps.dbConfig.url);
-    const username = deps.dbConfig.username ?? (u.username ? decodeURIComponent(u.username) : "default");
-    const password = deps.dbConfig.password ?? (u.password ? decodeURIComponent(u.password) : "");
+    const username = deps.dbConfig.username ?? decodeOr(u.username, "default");
+    const password = deps.dbConfig.password ?? decodeOr(u.password, "");
     u.username = "";
     u.password = "";
     u.pathname = "/";

@@ -8,7 +8,9 @@ export function collectSchema(schema: SchemaModule | ReadonlyArray<Table<any> | 
   tables: Table<any>[];
   views: MaterializedView[];
 } {
-  const values = Array.isArray(schema) ? schema : Object.values(schema as SchemaModule);
+  let values: unknown[];
+  if (Array.isArray(schema)) values = [...schema];
+  else values = Object.values(schema as SchemaModule);
   const tables: Table<any>[] = [];
   const views: MaterializedView[] = [];
   const seen = new Set<string>();

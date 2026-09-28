@@ -2,6 +2,7 @@ import { createClient, type ClickHouseClient } from "@clickhouse/client";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import { renderSql, sql, type SqlFragment } from "./sql.js";
 import { deserializeRow, serializeRow, type RowMeta } from "./serialize.js";
+import { decodeOr, toArray } from "../util.js";
 
 export interface DatabaseConfig {
   /** ClickHouse HTTP URL, e.g. http://localhost:8123. Credentials may be embedded (http://user:pass@host:8123). */
@@ -54,8 +55,8 @@ const DEFAULT_SETTINGS = {
 
 export function createDb(config: DatabaseConfig): Db {
   const parsed = new URL(config.url);
-  const username = config.username ?? (parsed.username ? decodeURIComponent(parsed.username) : "default");
-  const password = config.password ?? (parsed.password ? decodeURIComponent(parsed.password) : "");
+  const username = config.username ?? decodeOr(parsed.username, "default");
+  const password = config.password ?? decodeOr(parsed.password, "");
   const database = config.database ?? (parsed.pathname.replace(/^\//, "") || "default");
   parsed.username = "";
   parsed.password = "";
@@ -94,8 +95,9 @@ export function createDb(config: DatabaseConfig): Db {
       });
     },
     async rows(table, where, options) {
-      const final = options?.final ?? true;
-      const q = sql`SELECT * FROM ${table}${sql.raw(final ? " FINAL" : "")} ${where ?? sql.empty()}`;
+      let finalKeyword = " FINAL";
+      if (options?.final === false) finalKeyword = "";
+      const q = sql`SELECT * FROM ${table}${sql.raw(finalKeyword)} ${where ?? sql.empty()}`;
       const raw = await db.query(q, options);
       return raw.map((r) => deserializeRow(table, r)) as any;
     },
@@ -108,7 +110,7 @@ export function createDb(config: DatabaseConfig): Db {
     insert(table) {
       return {
         async values(rows, meta) {
-          const list = Array.isArray(rows) ? rows : [rows];
+          const list = toArray(rows);
           if (list.length === 0) return;
           await db.insertRaw(
             table.name,

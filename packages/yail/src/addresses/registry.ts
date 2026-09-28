@@ -2,6 +2,7 @@ import type { Db } from "../db/client.js";
 import { addresses as addressesTable } from "../db/internal.js";
 import { sql } from "../db/sql.js";
 import type { InferRow } from "../schema/table.js";
+import { toArray } from "../util.js";
 
 export type AddressStatus = "pending" | "backfilling" | "live" | "failed";
 export type AddressRow = InferRow<typeof addressesTable>;
@@ -32,9 +33,19 @@ export class AddressRegistry {
 
   constructor(private readonly db: Db, private readonly normalize: (chain: string, address: string) => string) {}
 
+  /**
+   * Load rows from the database, merging into memory. A row from the database
+   * only replaces the in-memory one when it is newer, so a refresh racing with
+   * a write made by another chain loop never reverts that write.
+   */
   async load(): Promise<void> {
     const rows = await this.db.rows(addressesTable);
-    this.rows = new Map(rows.map((r) => [key(r.set, r.chain, r.address), r]));
+    for (const r of rows) {
+      const k = key(r.set, r.chain, r.address);
+      const existing = this.rows.get(k);
+      if (existing && existing.updatedAt.getTime() > r.updatedAt.getTime()) continue;
+      this.rows.set(k, r);
+    }
   }
 
   onChange(fn: (row: AddressRow) => void): () => void {
@@ -72,7 +83,7 @@ export class AddressRegistry {
   }
 
   async register(input: RegisterInput | RegisterInput[]): Promise<AddressRow[]> {
-    const inputs = Array.isArray(input) ? input : [input];
+    const inputs = toArray(input);
     const now = new Date();
     const out: AddressRow[] = [];
     for (const i of inputs) {

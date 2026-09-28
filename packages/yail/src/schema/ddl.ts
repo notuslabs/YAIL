@@ -1,7 +1,9 @@
 import { columnTypeSql } from "./column.js";
 import { INDEX_META_COLUMNS, type Table } from "./table.js";
 import type { MaterializedView } from "./view.js";
-import { renderSql } from "../db/sql.js";
+import { qualify, renderSql } from "../db/sql.js";
+
+export { qualify };
 
 export function tableDdl(table: Table<any>, database?: string): string {
   const cols: string[] = [];
@@ -34,7 +36,7 @@ export function tableDdl(table: Table<any>, database?: string): string {
   if (table.options.settings && Object.keys(table.options.settings).length > 0) {
     parts.push(
       `SETTINGS ${Object.entries(table.options.settings)
-        .map(([k, v]) => `${k} = ${typeof v === "number" ? v : `'${v}'`}`)
+        .map(([k, v]) => `${k} = ${settingValue(v)}`)
         .join(", ")}`,
     );
   }
@@ -52,6 +54,7 @@ export function materializedViewPopulateSql(view: MaterializedView, database?: s
   return `INSERT INTO ${qualify(view.to.name, database)}\n${text}`;
 }
 
-export function qualify(name: string, database?: string): string {
-  return database ? `\`${database}\`.\`${name}\`` : `\`${name}\``;
+function settingValue(v: string | number): string {
+  if (typeof v === "number") return String(v);
+  return `'${v}'`;
 }

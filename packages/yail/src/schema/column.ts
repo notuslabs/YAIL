@@ -19,27 +19,28 @@ export type ColumnKind =
   | "json" // any JSON, stored as String
   | "array";
 
-export interface Column<T = unknown, Nullable extends boolean = false> {
+export interface Column<T = unknown, Nullable extends boolean = boolean, HasDefault extends boolean = boolean> {
   readonly __type?: T;
   readonly kind: ColumnKind;
   readonly chType: string;
   readonly isNullable: Nullable;
-  readonly hasDefault: boolean;
+  readonly hasDefault: HasDefault;
   readonly defaultSql?: string;
   readonly codecSql?: string;
   readonly isLowCardinality: boolean;
   readonly items?: Column;
 }
 
-type Builder<T, N extends boolean> = Column<T, N> & {
-  nullable(): Builder<T, true>;
-  default(sql: string): Builder<T, N>;
-  codec(codec: string): Builder<T, N>;
-  lowCardinality(): Builder<T, N>;
+type Builder<T, N extends boolean, D extends boolean> = Column<T, N, D> & {
+  nullable(): Builder<T, true, D>;
+  /** Column default (raw ClickHouse expression). Rows may omit the column on insert. */
+  default(sql: string): Builder<T, N, true>;
+  codec(codec: string): Builder<T, N, D>;
+  lowCardinality(): Builder<T, N, D>;
 };
 
-function make<T>(kind: ColumnKind, chType: string, extra: Partial<Column<T>> = {}): Builder<T, false> {
-  const col: Column<T, boolean> = {
+function make<T>(kind: ColumnKind, chType: string, extra: Partial<Column<T, boolean, boolean>> = {}): Builder<T, false, false> {
+  const col: Column<T, boolean, boolean> = {
     kind,
     chType,
     isNullable: false,
@@ -47,17 +48,17 @@ function make<T>(kind: ColumnKind, chType: string, extra: Partial<Column<T>> = {
     isLowCardinality: false,
     ...extra,
   };
-  return withMethods(col) as Builder<T, false>;
+  return withMethods(col) as Builder<T, false, false>;
 }
 
-function withMethods<T, N extends boolean>(col: Column<T, N>): Builder<T, N> {
+function withMethods<T, N extends boolean, D extends boolean>(col: Column<T, N, D>): Builder<T, N, D> {
   return {
     ...col,
     nullable() {
-      return withMethods({ ...col, isNullable: true as const }) as Builder<T, true>;
+      return withMethods({ ...col, isNullable: true as const }) as Builder<T, true, D>;
     },
     default(sql: string) {
-      return withMethods({ ...col, hasDefault: true, defaultSql: sql });
+      return withMethods({ ...col, hasDefault: true as const, defaultSql: sql }) as Builder<T, N, true>;
     },
     codec(codec: string) {
       return withMethods({ ...col, codecSql: codec });
@@ -99,7 +100,7 @@ export const t = {
   enum: <const V extends readonly string[]>(values: V) =>
     make<V[number]>("enum", `Enum8(${values.map((v, i) => `'${v}' = ${i + 1}`).join(", ")})`),
   json: <T = unknown>() => make<T>("json", "String"),
-  array: <C extends Column>(items: C) =>
+  array: <C extends Column<any, boolean, boolean>>(items: C) =>
     make<Array<NonNullable<C["__type"]>>>("array", `Array(${columnTypeSql(items)})`, { items }),
 } as const;
 

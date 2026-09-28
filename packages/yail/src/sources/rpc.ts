@@ -1,6 +1,7 @@
 import { createPublicClient, http, type PublicClient } from "viem";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions } from "./types.js";
 import { lower } from "./types.js";
+import { lowerOrNull } from "../util.js";
 
 export interface RpcSourceOptions {
   url: string;
@@ -53,7 +54,8 @@ export function rpc(options: RpcSourceOptions): EvmSource {
     },
     async getBlock(number: number) {
       const b = await client.getBlock({ blockNumber: BigInt(number) }).catch(() => null);
-      return b ? { number: Number(b.number), hash: b.hash, parentHash: b.parentHash, timestamp: Number(b.timestamp) } : null;
+      if (!b) return null;
+      return { number: Number(b.number), hash: b.hash, parentHash: b.parentHash, timestamp: Number(b.timestamp) };
     },
   };
 
@@ -61,17 +63,10 @@ export function rpc(options: RpcSourceOptions): EvmSource {
     const logs: EvmLog[] = [];
     const seenLogs = new Set<string>();
     for (const f of query.logs) {
-      const raw = (await client.request({
-        method: "eth_getLogs",
-        params: [
-          {
-            fromBlock: hex(from),
-            toBlock: hex(to - 1),
-            address: f.address && f.address.length > 0 ? (f.address.map(lower) as any) : undefined,
-            topics: f.topics?.map((alts) => (alts === null ? null : alts.length === 1 ? alts[0] : alts)) as any,
-          },
-        ],
-      })) as unknown as RawLog[];
+      const params: Record<string, unknown> = { fromBlock: hex(from), toBlock: hex(to - 1) };
+      if (f.address && f.address.length > 0) params.address = f.address.map(lower);
+      if (f.topics) params.topics = f.topics.map(topicAlternatives);
+      const raw = (await client.request({ method: "eth_getLogs", params: [params as any] })) as unknown as RawLog[];
       for (const l of raw) {
         const key = `${l.blockNumber}:${l.logIndex}`;
         if (seenLogs.has(key)) continue;
@@ -96,7 +91,8 @@ export function rpc(options: RpcSourceOptions): EvmSource {
     const needTxOfLogs = query.includeLogTransactions === true;
     const wantBlocks = new Set<number>(logs.map((l) => l.blockNumber));
 
-    const logTxHashes = new Set(needTxOfLogs ? logs.map((l) => l.transactionHash) : []);
+    const logTxHashes = new Set<string>();
+    if (needTxOfLogs) for (const l of logs) logTxHashes.add(l.transactionHash);
     if (query.transactions.length > 0) {
       // Account filters: scan every block in range with its transactions.
       const numbers = Array.from({ length: to - from }, (_, i) => from + i);
@@ -131,8 +127,9 @@ export function rpc(options: RpcSourceOptions): EvmSource {
         if (!r) return;
         tx.gasUsed = r.gasUsed;
         tx.effectiveGasPrice = r.effectiveGasPrice;
-        tx.status = r.status === "success" ? 1 : 0;
-        tx.contractAddress = r.contractAddress ? lower(r.contractAddress) : null;
+        tx.status = 0;
+        if (r.status === "success") tx.status = 1;
+        tx.contractAddress = lowerOrNull(r.contractAddress);
       });
     }
 
@@ -154,19 +151,36 @@ function toTx(tx: any, blockNumber: number): EvmTransaction {
     blockNumber,
     transactionIndex: Number(tx.transactionIndex),
     from: lower(tx.from),
-    to: tx.to ? lower(tx.to) : null,
+    to: lowerOrNull(tx.to),
     value: BigInt(tx.value ?? 0),
     input: tx.input ?? "0x",
-    nonce: tx.nonce !== undefined ? BigInt(tx.nonce) : undefined,
-    gas: tx.gas !== undefined ? BigInt(tx.gas) : undefined,
-    gasPrice: tx.gasPrice !== undefined && tx.gasPrice !== null ? BigInt(tx.gasPrice) : undefined,
-    type: typeof tx.typeHex === "string" ? Number(tx.typeHex) : undefined,
+    nonce: optionalBigInt(tx.nonce),
+    gas: optionalBigInt(tx.gas),
+    gasPrice: optionalBigInt(tx.gasPrice),
+    type: optionalHexNumber(tx.typeHex),
   };
+}
+
+function optionalBigInt(value: unknown): bigint | undefined {
+  if (value === undefined || value === null) return undefined;
+  return BigInt(value as string | number | bigint);
+}
+
+function optionalHexNumber(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  return Number(value);
+}
+
+/** eth_getLogs wants a single topic as a string and alternatives as an array. */
+function topicAlternatives(alts: string[] | null): string | string[] | null {
+  if (alts === null) return null;
+  if (alts.length === 1) return alts[0]!;
+  return alts;
 }
 
 export function matchesTxFilters(from: string, to: string | null | undefined, filters: EvmTxFilter[]): boolean {
   const f = lower(from);
-  const t = to ? lower(to) : null;
+  const t = lowerOrNull(to);
   return filters.some((filter) => {
     const fromOk = !filter.from || filter.from.length === 0 || filter.from.map(lower).includes(f);
     const toOk = !filter.to || filter.to.length === 0 || (t !== null && filter.to.map(lower).includes(t));

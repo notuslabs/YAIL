@@ -8,8 +8,10 @@ import { parseAbi } from "viem";
 import { startTestClickHouse, readFixture, fixtureSource, type TestClickHouse, type EvmFixture, type BitcoinFixture } from "../src/testing/index.js";
 import { createConfig, addressSet } from "../src/config/index.js";
 import { createIndexer } from "../src/indexer/indexer.js";
+import type { HandlerContext } from "../src/indexer/context.js";
 import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
+import type { Db } from "../src/db/client.js";
 
 const fixtures = new URL("./fixtures/", import.meta.url).pathname;
 let ch: TestClickHouse;
@@ -31,9 +33,9 @@ describe("Uniswap V3 pool on Base (WETH/USDC 0.05%)", () => {
     { pool: t.address(), txHash: t.hash(), logIndex: t.uint32(), block: t.uint64(), blockTime: t.dateTime(), amount0: t.int256(), amount1: t.int256(), sqrtPriceX96: t.uint256(), liquidity: t.uint256(), tick: t.int32() },
     { orderBy: ["pool", "block", "txHash", "logIndex"], scopes: { pool: "pool" } },
   );
-  let indexer: ReturnType<typeof createIndexer<any>>;
+  let db: Db | undefined;
   afterAll(async () => {
-    await indexer?.db.close();
+    await db?.close();
   });
 
   it("tracks price and liquidity exactly as slot0()/liquidity() report on-chain", async () => {
@@ -44,7 +46,7 @@ describe("Uniswap V3 pool on Base (WETH/USDC 0.05%)", () => {
       server: { port: false },
       observability: { pretty: false },
     });
-    indexer = createIndexer({ config, schema: { poolState, swaps } });
+    const indexer = createIndexer({ config, schema: { poolState, swaps } });
     indexer.on("setup", async ({ context }) => {
       // Seed state at the block before the fixture starts (from the recorded ground truth).
       context.db.insert(poolState).values({ pool: expected.pool, sqrtPriceX96: expected.startSqrtPriceX96, tick: expected.startTick, liquidity: expected.startLiquidity, block: BigInt(fixture.fromBlock - 1) });
@@ -53,7 +55,7 @@ describe("Uniswap V3 pool on Base (WETH/USDC 0.05%)", () => {
       context.db.insert(swaps).values({ pool: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, block: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000), amount0: event.args.amount0, amount1: event.args.amount1, sqrtPriceX96: event.args.sqrtPriceX96, liquidity: event.args.liquidity, tick: event.args.tick });
       context.db.insert(poolState).values({ pool: event.address, sqrtPriceX96: event.args.sqrtPriceX96, tick: event.args.tick, liquidity: event.args.liquidity, block: BigInt(event.block.number) });
     });
-    const applyLiquidity = async (ctx: any, pool: string, lower: number, upper: number, delta: bigint, block: number) => {
+    const applyLiquidity = async (ctx: HandlerContext, pool: string, lower: number, upper: number, delta: bigint, block: number) => {
       const state = await ctx.db.find(poolState, { pool });
       if (!state) throw new Error("state missing");
       if (state.tick >= lower && state.tick < upper) {
@@ -63,6 +65,7 @@ describe("Uniswap V3 pool on Base (WETH/USDC 0.05%)", () => {
     indexer.on("Pool:Mint", async ({ event, context }) => applyLiquidity(context, event.address, event.args.tickLower, event.args.tickUpper, event.args.amount, event.block.number));
     indexer.on("Pool:Burn", async ({ event, context }) => applyLiquidity(context, event.address, event.args.tickLower, event.args.tickUpper, -event.args.amount, event.block.number));
     await indexer.run();
+    db = indexer.db;
 
     const state = await indexer.db.find(poolState, { pool: expected.pool });
     expect(state).not.toBeNull();
@@ -86,9 +89,9 @@ describe("USDC wallets on Base", () => {
     { chain: t.string().lowCardinality(), wallet: t.address(), asset: t.address(), txHash: t.hash(), logIndex: t.int32(), delta: t.int256(), counterparty: t.address(), block: t.uint64(), blockTime: t.dateTime() },
     { orderBy: ["wallet", "chain", "asset", "txHash", "logIndex"], scopes: { wallet: "wallet" } },
   );
-  let indexer: ReturnType<typeof createIndexer<any>>;
+  let db: Db | undefined;
   afterAll(async () => {
-    await indexer?.db.close();
+    await db?.close();
   });
 
   it("reconstructs each wallet's USDC balance change from Transfer events", async () => {
@@ -103,7 +106,7 @@ describe("USDC wallets on Base", () => {
       server: { port: false },
       observability: { pretty: false },
     });
-    indexer = createIndexer({ config, schema: { ledger } });
+    const indexer = createIndexer({ config, schema: { ledger } });
     indexer.on("Usdc:Transfer", async ({ event, context }) => {
       expect(event.transaction?.hash).toBe(event.log.transactionHash); // includeTransactions
       const base = { chain: context.chain.name, asset: event.address, txHash: event.log.transactionHash, logIndex: event.log.logIndex, block: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000) };
@@ -113,9 +116,17 @@ describe("USDC wallets on Base", () => {
     const nativeSeen: string[] = [];
     indexer.on("Wallets:transaction", async ({ event, context }) => {
       nativeSeen.push(`${event.address}:${event.direction}`);
-      context.db.insert(ledger).values({ chain: context.chain.name, wallet: event.address, asset: "native", txHash: event.transaction.hash, logIndex: -1, delta: event.direction === "to" ? event.transaction.value : -event.transaction.value, counterparty: event.direction === "to" ? event.transaction.from : (event.transaction.to ?? ""), block: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000) });
+      const tx = event.transaction;
+      let delta = -tx.value;
+      let counterparty = tx.to ?? "";
+      if (event.direction === "to") {
+        delta = tx.value;
+        counterparty = tx.from;
+      }
+      context.db.insert(ledger).values({ chain: context.chain.name, wallet: event.address, asset: "native", txHash: tx.hash, logIndex: -1, delta, counterparty, block: BigInt(event.block.number), blockTime: new Date(event.block.timestamp * 1000) });
     });
     await indexer.run();
+    db = indexer.db;
 
     const rows = await indexer.db.query<{ wallet: string; delta: string; n: string }>(sql`SELECT wallet, sum(delta) AS delta, count() AS n FROM ${ledger} FINAL WHERE asset = ${expected.token} GROUP BY wallet`);
     const byWallet = Object.fromEntries(rows.map((r) => [r.wallet, BigInt(r.delta)]));
@@ -126,7 +137,9 @@ describe("USDC wallets on Base", () => {
     // Native transactions from/to wallets were dispatched once per (tx, wallet, direction).
     const expectedNative = fixture.transactions.flatMap((tx) => {
       const out: string[] = [];
-      if (expected.wallets.includes(tx.from)) out.push(`${tx.from}:${tx.to !== null && tx.to === tx.from ? "self" : "from"}`);
+      let direction = "from";
+      if (tx.to === tx.from) direction = "self";
+      if (expected.wallets.includes(tx.from)) out.push(`${tx.from}:${direction}`);
       if (tx.to && expected.wallets.includes(tx.to) && tx.to !== tx.from) out.push(`${tx.to}:to`);
       return out;
     });
@@ -138,9 +151,9 @@ describe("Bitcoin wallets via Esplora", () => {
   const fixture = readFixture<BitcoinFixture>(`${fixtures}bitcoin-wallets.json`);
   const expected = fixture.expected as { addresses: string[]; stats: Record<string, { txCount: number; balance: bigint; funded: bigint; spent: bigint }>; tip: number };
   const btcLedger = table("btc_ledger", { wallet: t.string(), txid: t.hash(), received: t.uint64(), sent: t.uint64(), fee: t.uint64(), block: t.uint64(), blockTime: t.dateTime() }, { orderBy: ["wallet", "txid"], scopes: { wallet: "wallet" } });
-  let indexer: ReturnType<typeof createIndexer<any>>;
+  let db: Db | undefined;
   afterAll(async () => {
-    await indexer?.db.close();
+    await db?.close();
   });
 
   it("reproduces funded/spent totals per address", async () => {
@@ -152,12 +165,13 @@ describe("Bitcoin wallets via Esplora", () => {
       server: { port: false },
       observability: { pretty: false },
     });
-    indexer = createIndexer({ config, schema: { btcLedger } });
+    const indexer = createIndexer({ config, schema: { btcLedger } });
     indexer.on("BtcWallets:transaction", async ({ event, context }) => {
       expect(context.chain.kind).toBe("bitcoin");
       context.db.insert(btcLedger).values({ wallet: event.address, txid: event.tx.txid, received: event.received, sent: event.sent, fee: event.fee, block: BigInt(event.block.height), blockTime: new Date(event.block.time * 1000) });
     });
     await indexer.run();
+    db = indexer.db;
     const rows = await indexer.db.query<{ wallet: string; received: string; sent: string; n: string }>(sql`SELECT wallet, sum(received) AS received, sum(sent) AS sent, count() AS n FROM ${btcLedger} FINAL GROUP BY wallet`);
     expect(rows.length).toBe(expected.addresses.length);
     for (const r of rows) {

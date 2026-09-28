@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import type { Indexer } from "../indexer/indexer.js";
 import { jobs as jobsTable } from "../db/internal.js";
 import { sql } from "../db/sql.js";
+import { bigintReplacer, toArray } from "../util.js";
 
 export function createApp(indexer: Indexer<any>): Hono {
   const app = new Hono();
@@ -10,13 +11,13 @@ export function createApp(indexer: Indexer<any>): Hono {
   app.get("/health", async (c) => {
     const status = await indexer.status();
     const failed = Object.values(status.chains).filter((ch) => ch.error);
-    return c.json({ ok: failed.length === 0, failed: failed.length }, failed.length === 0 ? 200 : 503);
+    return c.json({ ok: failed.length === 0, failed: failed.length }, statusCode(failed.length === 0));
   });
 
   app.get("/ready", async (c) => {
     const status = await indexer.status();
     const ready = Object.values(status.chains).every((ch) => ch.caughtUp && !ch.error);
-    return c.json({ ready, chains: Object.fromEntries(Object.entries(status.chains).map(([k, v]) => [k, { caughtUp: v.caughtUp, lagBlocks: v.lagBlocks }])) }, ready ? 200 : 503);
+    return c.json({ ready, chains: Object.fromEntries(Object.entries(status.chains).map(([k, v]) => [k, { caughtUp: v.caughtUp, lagBlocks: v.lagBlocks }])) }, statusCode(ready));
   });
 
   app.get("/status", async (c) => c.json(await indexer.status()));
@@ -31,7 +32,7 @@ export function createApp(indexer: Indexer<any>): Hono {
   app.post("/addresses", async (c) => {
     const body = await c.req.json<{ set: string; address: string | string[]; chain?: string; fromBlock?: number; meta?: Record<string, unknown> }>();
     if (!body.set || !body.address) return c.json({ error: "set and address are required" }, 400);
-    const list = (Array.isArray(body.address) ? body.address : [body.address]).map((address) => ({ set: body.set, address, chain: body.chain, fromBlock: body.fromBlock, meta: body.meta }));
+    const list = toArray(body.address).map((address) => ({ set: body.set, address, chain: body.chain, fromBlock: body.fromBlock, meta: body.meta }));
     const rows = await indexer.addresses.register(list);
     return c.json(rows.map(serializable), 201);
   });
@@ -70,6 +71,11 @@ export async function startServer(indexer: Indexer<any>, options: { port: number
   };
 }
 
+function statusCode(ok: boolean): 200 | 503 {
+  if (ok) return 200;
+  return 503;
+}
+
 function serializable<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x)));
+  return JSON.parse(JSON.stringify(v, bigintReplacer));
 }

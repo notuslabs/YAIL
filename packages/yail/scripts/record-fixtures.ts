@@ -107,7 +107,8 @@ async function recordBitcoin() {
     const r = await fetch(`${ESPLORA}${p}`);
     if (!r.ok) throw new Error(`${p}: ${r.status}`);
     const text = await r.text();
-    return (text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text) as T;
+    if (text.startsWith("{") || text.startsWith("[")) return JSON.parse(text) as T;
+    return text as T;
   };
   const tip = Number(await get<string>("/blocks/tip/height"));
   // Find a few dormant addresses with a short, fully confirmed history in a block ~1 day old.

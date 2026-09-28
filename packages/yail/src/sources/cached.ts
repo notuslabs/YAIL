@@ -20,11 +20,11 @@ export interface CachedSourceOptions {
  * shape (filters) so different filter sets never mix.
  */
 export function cached<S extends Source>(inner: S, options: CachedSourceOptions): S {
-  const wrapped = {
+  const evmInner = inner as EvmSource;
+  const wrapped: Record<string, unknown> = {
     kind: inner.kind,
     name: `cached(${inner.name})`,
     getHeight: () => inner.getHeight(),
-    getBlock: (inner as EvmSource).getBlock ? (n: number) => (inner as EvmSource).getBlock!(n) : undefined,
     async *fetch(query: RangeQuery, fetchOptions?: FetchOptions): AsyncIterable<RangeBatch> {
       const queryHash = hashQuery(query);
       const cachedRanges = await options.db.query<{ from_block: string; next_block: string }>(
@@ -39,7 +39,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
       while (cursor < query.toBlock) {
         fetchOptions?.signal?.throwIfAborted();
         while (ri < ranges.length && ranges[ri]!.next <= cursor) ri++;
-        const hit = ri < ranges.length ? ranges[ri]! : undefined;
+        const hit = ranges[ri];
         if (hit && hit.from === cursor) {
           const rows = await options.db.query<{ payload: string }>(
             sql`SELECT payload FROM ${sourceCache} FINAL WHERE chain = ${options.chain} AND query_hash = ${queryHash} AND from_block = ${cursor} LIMIT 1`,
@@ -55,7 +55,8 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
           }
         }
         // Miss: fetch from inner up to the next cached range start (or the end).
-        const missEnd = hit ? Math.min(hit.from, query.toBlock) : query.toBlock;
+        let missEnd = query.toBlock;
+        if (hit) missEnd = Math.min(hit.from, missEnd);
         options.onEvent?.({ type: "miss", fromBlock: cursor, nextBlock: missEnd });
         const finalized = options.finalizedHeight?.();
         for await (const batch of (inner as EvmSource).fetch({ ...(query as any), fromBlock: cursor, toBlock: missEnd }, fetchOptions)) {
@@ -78,6 +79,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
       }
     },
   };
+  if (evmInner.getBlock) wrapped.getBlock = (n: number) => evmInner.getBlock!(n);
   return wrapped as unknown as S;
 }
 
@@ -93,11 +95,21 @@ export function hashQuery(query: RangeQuery): string {
 }
 
 export function serializeBatch(batch: unknown): string {
-  return JSON.stringify(batch, (_k, v) => (typeof v === "bigint" ? { $big: v.toString() } : v));
+  return JSON.stringify(batch, tagBigint);
 }
 
 export function reviveBatch(payload: string): unknown {
-  return JSON.parse(payload, (_k, v) => (v && typeof v === "object" && typeof v.$big === "string" ? BigInt(v.$big) : v));
+  return JSON.parse(payload, untagBigint);
+}
+
+function tagBigint(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") return { $big: value.toString() };
+  return value;
+}
+
+function untagBigint(_key: string, value: unknown): unknown {
+  if (value && typeof value === "object" && typeof (value as { $big?: unknown }).$big === "string") return BigInt((value as { $big: string }).$big);
+  return value;
 }
 
 function clampBatch(batch: RangeBatch, next: number): RangeBatch {

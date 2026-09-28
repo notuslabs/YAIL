@@ -45,7 +45,8 @@ export function esplora(options: EsploraOptions): BitcoinSource {
       }
       if (!res.ok) throw new Error(`esplora ${path}: HTTP ${res.status} ${await res.text().catch(() => "")}`);
       const text = await res.text();
-      return (text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text) as T;
+      if (text.startsWith("{") || text.startsWith("[")) return JSON.parse(text) as T;
+      return text as T;
     }
   }
 
@@ -54,7 +55,9 @@ export function esplora(options: EsploraOptions): BitcoinSource {
     let lastSeen: string | undefined;
     for (;;) {
       signal?.throwIfAborted();
-      const page = await getJson<EsploraTx[]>(`/address/${address}/txs/chain${lastSeen ? `/${lastSeen}` : ""}`, signal);
+      let path = `/address/${address}/txs/chain`;
+      if (lastSeen) path += `/${lastSeen}`;
+      const page = await getJson<EsploraTx[]>(path, signal);
       if (page.length === 0) break;
       let reachedBottom = false;
       for (const tx of page) {
@@ -109,7 +112,8 @@ export function esplora(options: EsploraOptions): BitcoinSource {
           chunk.push(txs[end]!);
           end++;
         }
-        const next = last ? query.toBlock : chunk[chunk.length - 1]!.blockHeight + 1;
+        let next = chunk[chunk.length - 1]!.blockHeight + 1;
+        if (last) next = query.toBlock;
         yield { fromBlock: from, nextBlock: next, transactions: chunk } satisfies BitcoinBatch;
         from = next;
         start = end - size;
@@ -129,10 +133,15 @@ function toTransaction(tx: EsploraTx): BitcoinTransaction {
       txid: v.txid,
       vout: v.vout,
       isCoinbase: v.is_coinbase,
-      prevout: v.prevout ? { address: v.prevout.scriptpubkey_address ?? null, value: BigInt(v.prevout.value) } : null,
+      prevout: toPrevout(v.prevout),
     })),
     vout: tx.vout.map((o, n) => ({ n, address: o.scriptpubkey_address ?? null, value: BigInt(o.value), scriptType: o.scriptpubkey_type })),
   };
+}
+
+function toPrevout(prevout: EsploraTx["vin"][number]["prevout"]): BitcoinTransaction["vin"][number]["prevout"] {
+  if (!prevout) return null;
+  return { address: prevout.scriptpubkey_address ?? null, value: BigInt(prevout.value) };
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

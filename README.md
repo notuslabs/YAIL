@@ -5,7 +5,8 @@ Yet Another Indexer Library. A blockchain indexer with Ponder's developer experi
 | path | what |
 |---|---|
 | [`packages/yail`](packages/yail/README.md) | the library: config, schema DSL, sources, runtime, CLI, testing helpers |
-| [`examples/wallet-ledger`](examples/wallet-ledger/README.md) | a multi-chain wallet ledger (Base, Polygon, Arbitrum, Bitcoin), the indexer behind the patrimony chart project |
+| [`examples/quickstart`](examples/quickstart/README.md) | five-minute try-out: one contract, one table, public RPC, no keys |
+| [`examples/wallet-ledger`](examples/wallet-ledger/README.md) | multi-chain wallet ledger (Base, Polygon, Arbitrum, Bitcoin), the indexer behind the patrimony chart project |
 
 ```sh
 pnpm install

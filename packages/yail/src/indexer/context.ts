@@ -8,6 +8,7 @@ import type { CachedClient } from "../rpc/cached-client.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
 import type { Config } from "../config/types.js";
+import { toArray } from "../util.js";
 
 /** `context.db`: same as `Db` but inserts are buffered and flushed per batch. */
 export interface HandlerDb extends Omit<Db, "insert"> {
@@ -63,7 +64,7 @@ export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: Ro
     insert(table) {
       return {
         values(rows) {
-          for (const r of Array.isArray(rows) ? rows : [rows]) writer.add(table, r, meta.current);
+          for (const r of toArray<any>(rows)) writer.add(table, r, meta.current);
         },
       };
     },

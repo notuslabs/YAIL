@@ -1,6 +1,7 @@
-import { HypersyncClient, type Query, type QueryResponse, type StreamConfig, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock } from "@envio-dev/hypersync-client";
+import { HypersyncClient, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock } from "@envio-dev/hypersync-client";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, FetchOptions } from "./types.js";
 import { lower } from "./types.js";
+import { lowerOrNull } from "../util.js";
 
 export interface HypersyncOptions {
   /** e.g. https://base.hypersync.xyz (see https://docs.envio.dev/docs/HyperSync/hypersync-supported-networks). */
@@ -62,7 +63,8 @@ export function hypersync(options: HypersyncOptions): EvmSource {
         fieldSelection: { block: [...BLOCK_FIELDS] },
       });
       const b = res.data.blocks[0];
-      return b ? toBlock(b) : null;
+      if (!b) return null;
+      return toBlock(b);
     },
   };
   return source;
@@ -110,39 +112,37 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
 
 export function toHypersyncQuery(query: EvmQuery): Query {
   const wantTx = query.transactions.length > 0 || query.includeLogTransactions;
+  const logFields: LogField[] = [];
+  if (query.logs.length > 0) logFields.push(...LOG_FIELDS);
+  const txFields: TransactionField[] = [];
+  if (wantTx) txFields.push(...TX_FIELDS);
   return {
     fromBlock: query.fromBlock,
     toBlock: query.toBlock,
-    logs: query.logs.map((f) => ({
-      address: f.address?.map(lower),
-      topics: f.topics ? f.topics.map((alts) => alts ?? []) : undefined,
-    })),
+    logs: query.logs.map((f) => {
+      const filter: LogFilter = { address: f.address?.map(lower) };
+      if (f.topics) filter.topics = f.topics.map((alts) => alts ?? []);
+      return filter;
+    }),
     transactions: query.transactions.map((f) => ({ from: f.from?.map(lower), to: f.to?.map(lower) })),
-    fieldSelection: {
-      block: [...BLOCK_FIELDS],
-      log: query.logs.length > 0 ? [...LOG_FIELDS] : [],
-      transaction: wantTx ? [...TX_FIELDS] : [],
-    },
+    fieldSelection: { block: [...BLOCK_FIELDS], log: logFields, transaction: txFields },
   };
 }
 
 function toBatch(res: QueryResponse, fromBlock: number, nextBlock: number): EvmBatch {
-  return {
+  const batch: EvmBatch = {
     fromBlock,
     nextBlock,
     blocks: res.data.blocks.map(toBlock),
     transactions: res.data.transactions.map(toTransaction),
     logs: res.data.logs.map(toLog),
-    rollbackGuard: res.rollbackGuard
-      ? {
-          blockNumber: res.rollbackGuard.blockNumber,
-          hash: res.rollbackGuard.hash,
-          firstBlockNumber: res.rollbackGuard.firstBlockNumber,
-          firstParentHash: res.rollbackGuard.firstParentHash,
-        }
-      : undefined,
     archiveHeight: res.archiveHeight,
   };
+  const guard = res.rollbackGuard;
+  if (guard) {
+    batch.rollbackGuard = { blockNumber: guard.blockNumber, hash: guard.hash, firstBlockNumber: guard.firstBlockNumber, firstParentHash: guard.firstParentHash };
+  }
+  return batch;
 }
 
 function toBlock(b: HsBlock): EvmBlock {
@@ -169,7 +169,7 @@ function toTransaction(t: HsTx): EvmTransaction {
     blockNumber: t.blockNumber!,
     transactionIndex: t.transactionIndex!,
     from: lower(t.from!),
-    to: t.to ? lower(t.to) : null,
+    to: lowerOrNull(t.to),
     value: t.value ?? 0n,
     input: t.input ?? "0x",
     nonce: t.nonce,

@@ -13,6 +13,7 @@ import type { ChainNames, EventNames, EventOf } from "./events.js";
 import { JobRunner, type JobRow } from "./jobs.js";
 import { buildPlans, type ChainPlan } from "./plan.js";
 import { ChainRunner, type Handler } from "./runtime.js";
+import { toArray } from "../util.js";
 
 export interface IndexerOptions<C extends Config<any, any, any>> {
   config: C;
@@ -85,7 +86,9 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
   const { tables } = collectSchema(options.schema);
   const contracts: Record<string, { abi: any; address?: string }> = {};
   for (const [name, c] of Object.entries((config.contracts ?? {}) as Record<string, any>)) {
-    contracts[name] = { abi: c.abi, address: typeof c.address === "string" ? c.address.toLowerCase() : undefined };
+    const entry: { abi: any; address?: string } = { abi: c.abi };
+    if (typeof c.address === "string") entry.address = c.address.toLowerCase();
+    contracts[name] = entry;
   }
 
   const need = <T>(v: T | undefined, what: string): T => {
@@ -93,7 +96,10 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     return v;
   };
 
-  const normalize = (chain: string, address: string) => (config.chains[chain]?.source.kind === "evm" ? address.toLowerCase() : address);
+  const normalize = (chain: string, address: string) => {
+    if (config.chains[chain]?.source.kind === "evm") return address.toLowerCase();
+    return address;
+  };
 
   async function doInit(): Promise<void> {
     db = createDb(config.database);
@@ -105,7 +111,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
     // Resolve "latest" start blocks once.
     const latest = new Map<string, number>();
-    const usesLatest = JSON.stringify(config, (_k, v) => (typeof v === "bigint" ? v.toString() : typeof v === "function" ? undefined : v)).includes('"latest"');
+    const usesLatest = JSON.stringify(config, configReplacer).includes('"latest"');
     if (usesLatest) {
       for (const [name, chain] of Object.entries(config.chains as Record<string, any>)) latest.set(name, await chain.source.getHeight());
     }
@@ -233,8 +239,9 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     addresses: {
       async register(input) {
         await indexer.init();
-        const list = (Array.isArray(input) ? input : [input]).flatMap((i) => {
-          const chains = i.chain ? [i.chain] : [...plans.values()].filter((p) => p.sets.has(i.set)).map((p) => p.chain);
+        const list = toArray(input).flatMap((i) => {
+          let chains = [...plans.values()].filter((p) => p.sets.has(i.set)).map((p) => p.chain);
+          if (i.chain) chains = [i.chain];
           if (chains.length === 0) throw new Error(`address set "${i.set}" is not used by any chain`);
           return chains.map((chain) => ({ set: i.set, chain, address: i.address, fromBlock: i.fromBlock ?? plans.get(chain)!.sets.get(i.set) ?? 0, meta: i.meta }));
         });
@@ -272,6 +279,12 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     },
   };
   return indexer;
+}
+
+function configReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "function") return undefined;
+  return value;
 }
 
 export { isAddressSet, isFactory };
