@@ -4,6 +4,7 @@ USDC transfers on Base for wallets you register while it runs. Public RPC, no AP
 
 ```sh
 docker run -d --name yail-clickhouse -p 127.0.0.1:18123:8123 -e CLICKHOUSE_PASSWORD=yail clickhouse/clickhouse-server:25.8
+export CLICKHOUSE_URL=http://default:yail@localhost:18123
 pnpm install && pnpm -r build     # repo root, once
 cd examples/quickstart
 pnpm migrate                      # creates the database and the `transfers` table
