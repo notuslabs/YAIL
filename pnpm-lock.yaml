@@ -8,6 +8,22 @@ importers:
 
   .: {}
 
+  examples/quickstart:
+    dependencies:
+      viem:
+        specifier: ^2.56.9
+        version: 2.56.9(typescript@7.0.2)(zod@4.6.5)
+      yail:
+        specifier: workspace:*
+        version: link:../../packages/yail
+    devDependencies:
+      '@types/node':
+        specifier: ^24
+        version: 24.19.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   examples/wallet-ledger:
     dependencies:
       viem:

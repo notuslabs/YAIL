@@ -1,0 +1,14 @@
+{
+  "name": "quickstart",
+  "private": true,
+  "type": "module",
+  "description": "Smallest possible yail indexer: USDC transfers on Base over a public RPC, no API keys",
+  "scripts": {
+    "migrate": "yail migrate src/index.ts",
+    "dev": "yail dev src/index.ts",
+    "start": "yail start src/index.ts",
+    "status": "yail status"
+  },
+  "dependencies": { "viem": "^2.56.9", "yail": "workspace:*" },
+  "devDependencies": { "@types/node": "^24", "typescript": "^7.0.2" }
+}

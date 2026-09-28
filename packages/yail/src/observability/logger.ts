@@ -64,6 +64,8 @@ export async function initObservability(config: ObservabilityConfig = {}, deps: 
       env: { service: serviceName, environment: process.env.NODE_ENV ?? "development" },
       pretty: config.pretty ?? process.env.NODE_ENV !== "production",
       minLevel: config.logLevel,
+      // YAIL_QUIET=1 is set by one-shot CLI commands whose stdout must stay machine-readable.
+      silent: process.env.YAIL_QUIET === "1",
       drain,
       _suppressDrainWarning: true,
     });

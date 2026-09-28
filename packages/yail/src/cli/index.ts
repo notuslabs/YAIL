@@ -47,6 +47,7 @@ export async function run(argv: string[]): Promise<void> {
     },
   });
   const [command, ...rest] = positionals;
+  if (command && !["start", "dev"].includes(command)) process.env.YAIL_QUIET ??= "1";
   if (!command || values.help) {
     console.log(HELP);
     return;
