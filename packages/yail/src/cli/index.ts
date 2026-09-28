@@ -103,8 +103,7 @@ export async function run(argv: string[]): Promise<void> {
     }
     case "ddl": {
       const indexer = await loadIndexer(entry);
-      const schema = (indexer as any).__schema ?? [];
-      console.log(schemaDdl(schema, indexer.config.database.database).join(";\n\n") + ";");
+      console.log(schemaDdl(indexer.schema, indexer.config.database.database).join(";\n\n") + ";");
       return;
     }
     case "reindex": {

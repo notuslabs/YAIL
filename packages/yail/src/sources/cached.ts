@@ -84,7 +84,11 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
 /** Hash of the query minus its block range. */
 export function hashQuery(query: RangeQuery): string {
   const { fromBlock: _f, toBlock: _t, ...shape } = query as unknown as Record<string, unknown>;
-  const json = JSON.stringify(shape, (_k, v) => (Array.isArray(v) ? v : typeof v === "string" ? v.toLowerCase() : v));
+  const json = JSON.stringify(shape, (_k, v) => {
+    if (typeof v === "string") return v.toLowerCase();
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map((x) => x.toLowerCase()).sort();
+    return v;
+  });
   return createHash("sha256").update(json).digest("hex").slice(0, 32);
 }
 

@@ -113,12 +113,15 @@ describe("indexer end-to-end (synthetic fixture)", () => {
       [W1]: { total: 100n - 40n + 2n, n: 3 },
       [W2]: { total: 40n - 1n, n: 2 },
     });
-    const nat = await indexer.db.rows(native, sql`ORDER BY wallet`);
+    // Every transaction sent by a wallet is an account event, including the zero-value ERC-20 transfer calls.
+    const nat = await indexer.db.rows(native, sql`ORDER BY wallet, value`);
     expect(nat.map((r) => [r.wallet, r.direction, r.value])).toEqual([
       [W1, "from", -5n],
+      [W1, "from", 0n],
+      [W2, "from", 0n],
       [W2, "to", 9n],
     ]);
-    const pools = await indexer.db.rows(poolEvents, sql`ORDER BY pool, log_index`);
+    const pools = await indexer.db.rows(poolEvents, sql`ORDER BY pool, _yail_block, log_index`);
     expect(pools.map((r) => [r.pool, r.value])).toEqual([
       [POOL_A, 1n],
       [POOL_A, 2n],
@@ -156,7 +159,7 @@ describe("indexer end-to-end (synthetic fixture)", () => {
     expect(rowsBlock30.map((r) => [r.wallet, r.delta])).toEqual([[W1, 2n], [W3, -2n]]);
 
     // Re-index W3: rows are deleted and rebuilt from its history.
-    await indexer.db.command(sql`INSERT INTO ${ledger} (chain, wallet, token, tx_hash, log_index, delta, block, mode) VALUES ('test', ${W3}, ${TOKEN}, '0xbogus', 0, 999, 1, 'garbage')`);
+    await indexer.db.command(sql`INSERT INTO ${ledger} (chain, wallet, token, tx_hash, log_index, delta, block, mode, _yail_chain, _yail_block) VALUES ('test', ${W3}, ${TOKEN}, '0xbogus', 0, 999, 1, 'garbage', 'test', 1)`);
     expect((await balances(indexer))[W3]!.n).toBe(3);
     await indexer.reindex({ chain: "test", scope: "wallet", value: W3 });
     await indexer.run();

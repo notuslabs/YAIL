@@ -87,7 +87,7 @@ describe("wallet ledger", () => {
     expect(usdcSeries.length).toBeGreaterThan(0);
     const last = usdcSeries.at(-1)!;
     const { start, end } = usdcExpected.balances[w]!;
-    expect(last.balance).toBe(end - start);
+    expect(last.balance, JSON.stringify(series, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).toBe(end - start);
     const flows = await flowsInPeriod(indexer.db, w, new Date("2020-01-01"), new Date("2100-01-01"));
     const f = flows.find((x) => x.asset === usdcExpected.token)!;
     expect(f.inflow - f.outflow).toBe(end - start);

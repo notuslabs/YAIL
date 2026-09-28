@@ -86,6 +86,7 @@ export class JobRunner {
     this.stopped = true;
     this.wake?.();
     await this.loopPromise;
+    this.loopPromise = undefined;
   }
 
   /** Resolve once the queue is empty and no job is running. */

@@ -57,7 +57,7 @@ export class AddressRegistry {
     for (const r of this.rows.values()) {
       if (r.set === set && r.chain === chain && r.status !== "failed" && r.adopted) out.push(r.address);
     }
-    return out;
+    return out.sort(); // deterministic order: query shapes (and cache keys) must not depend on load order
   }
 
   list(filter: { set?: string; chain?: string; status?: AddressStatus } = {}): AddressRow[] {

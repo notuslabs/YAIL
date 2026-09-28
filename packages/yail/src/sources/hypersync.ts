@@ -22,12 +22,13 @@ const LOG_FIELDS = ["BlockNumber", "BlockHash", "TransactionHash", "TransactionI
 const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "Status", "Type", "ContractAddress"] as const;
 
 export function hypersync(options: HypersyncOptions): EvmSource {
-  const apiToken = options.apiToken ?? process.env.ENVIO_API_TOKEN;
-  if (!apiToken) {
-    throw new Error(`hypersync(${options.url}): missing apiToken. Pass it explicitly or set ENVIO_API_TOKEN (https://app.envio.dev/api-tokens).`);
-  }
   let client: HypersyncClient | undefined;
   const getClient = () => {
+    // Resolved lazily so `yail ddl` / `yail migrate` work without a token.
+    const apiToken = options.apiToken ?? process.env.ENVIO_API_TOKEN;
+    if (!apiToken) {
+      throw new Error(`hypersync(${options.url}): missing apiToken. Pass it explicitly or set ENVIO_API_TOKEN (https://app.envio.dev/api-tokens).`);
+    }
     client ??= new HypersyncClient({
       url: options.url,
       apiToken,

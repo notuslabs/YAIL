@@ -42,6 +42,7 @@ export interface ReindexRequest {
 
 export interface Indexer<C extends Config<any, any, any>> {
   readonly config: C;
+  readonly schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>;
   /** Register a handler. Names are `Contract:Event`, `Account:transaction`, or `setup`. */
   on<name extends EventNames<C>>(name: name, handler: (args: { event: EventOf<C, name>; context: HandlerContext<C, ChainNames<C>> }) => Promise<void> | void): Indexer<C>;
   /** Connect, migrate, and prepare runners without indexing. Idempotent. */
@@ -161,6 +162,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
   const indexer: Indexer<C> = {
     config,
+    schema: options.schema,
     get db() {
       return need(db, "db");
     },
