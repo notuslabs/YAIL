@@ -1,0 +1,48 @@
+{
+  "name": "yail",
+  "version": "0.1.0",
+  "description": "Yet Another Indexer Library: Ponder-like DX, HyperSync-first, ClickHouse-native blockchain indexer",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "yail": "./bin/yail.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./testing": { "types": "./dist/testing/index.d.ts", "default": "./dist/testing/index.js" },
+    "./otel": { "types": "./dist/observability/otel.d.ts", "default": "./dist/observability/otel.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "bin", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.23.1",
+    "@envio-dev/hypersync-client": "^1.4.1",
+    "@hono/node-server": "^2.1.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-metrics": "^2.11.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
+    "@opentelemetry/semantic-conventions": "^1.37.0",
+    "evlog": "^2.29.0",
+    "hono": "^4.13.10",
+    "tsx": "^4.23.15",
+    "viem": "^2.56.9",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@testcontainers/clickhouse": "^12.2.0",
+    "@types/node": "^24",
+    "testcontainers": "^12.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

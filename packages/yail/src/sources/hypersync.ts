@@ -1,0 +1,183 @@
+import { HypersyncClient, type Query, type QueryResponse, type StreamConfig, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock } from "@envio-dev/hypersync-client";
+import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, FetchOptions } from "./types.js";
+import { lower } from "./types.js";
+
+export interface HypersyncOptions {
+  /** e.g. https://base.hypersync.xyz (see https://docs.envio.dev/docs/HyperSync/hypersync-supported-networks). */
+  url: string;
+  /** Envio API token (https://app.envio.dev/api-tokens). Falls back to ENVIO_API_TOKEN. */
+  apiToken?: string;
+  maxNumRetries?: number;
+  httpReqTimeoutMillis?: number;
+  /** Parallel requests used by the streaming path for large ranges. Default 8. */
+  concurrency?: number;
+  /** Use the parallel stream API when a range spans at least this many blocks. Default 5000. */
+  streamThreshold?: number;
+  /** Target response size hint for the stream API. Default 400k. */
+  responseBytesTarget?: number;
+}
+
+const BLOCK_FIELDS = ["Number", "Hash", "ParentHash", "Timestamp"] as const;
+const LOG_FIELDS = ["BlockNumber", "BlockHash", "TransactionHash", "TransactionIndex", "LogIndex", "Address", "Data", "Topic0", "Topic1", "Topic2", "Topic3", "Removed"] as const;
+const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "Status", "Type", "ContractAddress"] as const;
+
+export function hypersync(options: HypersyncOptions): EvmSource {
+  const apiToken = options.apiToken ?? process.env.ENVIO_API_TOKEN;
+  if (!apiToken) {
+    throw new Error(`hypersync(${options.url}): missing apiToken. Pass it explicitly or set ENVIO_API_TOKEN (https://app.envio.dev/api-tokens).`);
+  }
+  let client: HypersyncClient | undefined;
+  const getClient = () => {
+    client ??= new HypersyncClient({
+      url: options.url,
+      apiToken,
+      maxNumRetries: options.maxNumRetries ?? 12,
+      httpReqTimeoutMillis: options.httpReqTimeoutMillis ?? 30_000,
+    });
+    return client;
+  };
+
+  const source: EvmSource = {
+    kind: "evm",
+    name: `hypersync(${new URL(options.url).host})`,
+    async getHeight() {
+      return getClient().getHeight();
+    },
+    async *fetch(query: EvmQuery, fetchOptions?: FetchOptions) {
+      const hsQuery = toHypersyncQuery(query);
+      const span = query.toBlock - query.fromBlock;
+      const threshold = options.streamThreshold ?? 5000;
+      if (span >= threshold) {
+        yield* streamRange(getClient(), hsQuery, query, options, fetchOptions);
+      } else {
+        yield* getRange(getClient(), hsQuery, query, fetchOptions);
+      }
+    },
+    async getBlock(number: number) {
+      const res = await getClient().get({
+        fromBlock: number,
+        toBlock: number + 1,
+        includeAllBlocks: true,
+        fieldSelection: { block: [...BLOCK_FIELDS] },
+      });
+      const b = res.data.blocks[0];
+      return b ? toBlock(b) : null;
+    },
+  };
+  return source;
+}
+
+async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
+  let from = query.fromBlock;
+  while (from < query.toBlock) {
+    fetchOptions?.signal?.throwIfAborted();
+    const res = await client.get({ ...hsQuery, fromBlock: from });
+    const next = Math.min(res.nextBlock, query.toBlock);
+    if (next <= from) throw new Error(`hypersync: nextBlock ${res.nextBlock} did not advance from ${from}`);
+    yield toBatch(res, from, next);
+    from = next;
+  }
+}
+
+async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, options: HypersyncOptions, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
+  const cfg: StreamConfig = {
+    concurrency: options.concurrency ?? 8,
+    responseBytesTarget: options.responseBytesTarget ?? 400_000,
+    hexOutput: "Prefixed",
+  };
+  const stream = await client.stream(hsQuery, cfg);
+  let from = query.fromBlock;
+  try {
+    while (from < query.toBlock) {
+      if (fetchOptions?.signal?.aborted) break;
+      const res = await stream.recv();
+      if (res === null) break;
+      const next = Math.min(res.nextBlock, query.toBlock);
+      if (next <= from) continue; // empty overlapping page
+      yield toBatch(res, from, next);
+      from = next;
+    }
+  } finally {
+    await stream.close().catch(() => {});
+  }
+  fetchOptions?.signal?.throwIfAborted();
+  // The stream API is allowed to stop early (server-side limits); cover the remainder with plain gets.
+  if (from < query.toBlock) {
+    yield* getRange(client, hsQuery, { ...query, fromBlock: from }, fetchOptions);
+  }
+}
+
+export function toHypersyncQuery(query: EvmQuery): Query {
+  const wantTx = query.transactions.length > 0 || query.includeLogTransactions;
+  return {
+    fromBlock: query.fromBlock,
+    toBlock: query.toBlock,
+    logs: query.logs.map((f) => ({
+      address: f.address?.map(lower),
+      topics: f.topics ? f.topics.map((alts) => alts ?? []) : undefined,
+    })),
+    transactions: query.transactions.map((f) => ({ from: f.from?.map(lower), to: f.to?.map(lower) })),
+    fieldSelection: {
+      block: [...BLOCK_FIELDS],
+      log: query.logs.length > 0 ? [...LOG_FIELDS] : [],
+      transaction: wantTx ? [...TX_FIELDS] : [],
+    },
+  };
+}
+
+function toBatch(res: QueryResponse, fromBlock: number, nextBlock: number): EvmBatch {
+  return {
+    fromBlock,
+    nextBlock,
+    blocks: res.data.blocks.map(toBlock),
+    transactions: res.data.transactions.map(toTransaction),
+    logs: res.data.logs.map(toLog),
+    rollbackGuard: res.rollbackGuard
+      ? {
+          blockNumber: res.rollbackGuard.blockNumber,
+          hash: res.rollbackGuard.hash,
+          firstBlockNumber: res.rollbackGuard.firstBlockNumber,
+          firstParentHash: res.rollbackGuard.firstParentHash,
+        }
+      : undefined,
+    archiveHeight: res.archiveHeight,
+  };
+}
+
+function toBlock(b: HsBlock): EvmBlock {
+  return { number: b.number!, hash: b.hash!, parentHash: b.parentHash, timestamp: Number(b.timestamp!) };
+}
+
+function toLog(l: HsLog): EvmLog {
+  return {
+    blockNumber: l.blockNumber!,
+    blockHash: l.blockHash,
+    transactionHash: l.transactionHash!,
+    transactionIndex: l.transactionIndex!,
+    logIndex: l.logIndex!,
+    address: lower(l.address!),
+    data: l.data ?? "0x",
+    topics: l.topics.filter((t): t is string => typeof t === "string" && t.length > 0),
+    removed: l.removed,
+  };
+}
+
+function toTransaction(t: HsTx): EvmTransaction {
+  return {
+    hash: t.hash!,
+    blockNumber: t.blockNumber!,
+    transactionIndex: t.transactionIndex!,
+    from: lower(t.from!),
+    to: t.to ? lower(t.to) : null,
+    value: t.value ?? 0n,
+    input: t.input ?? "0x",
+    nonce: t.nonce,
+    gas: t.gas,
+    gasPrice: t.gasPrice,
+    gasUsed: t.gasUsed,
+    effectiveGasPrice: t.effectiveGasPrice,
+    status: t.status,
+    type: t.type,
+    contractAddress: t.contractAddress ?? null,
+  };
+}

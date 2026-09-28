@@ -1,0 +1,24 @@
+{
+  "name": "wallet-ledger",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Ledger of every movement of every registered wallet (EVM via HyperSync, Bitcoin via Esplora) in ClickHouse",
+  "scripts": {
+    "dev": "yail dev src/index.ts",
+    "start": "yail start src/index.ts",
+    "migrate": "yail migrate src/index.ts",
+    "addresses": "yail addresses",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.56.9",
+    "yail": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}
