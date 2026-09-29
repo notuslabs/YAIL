@@ -30,7 +30,7 @@
     "node": ">=20"
   },
   "bin": {
-    "yail": "./bin/yail.js"
+    "yail": "bin/yail.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
