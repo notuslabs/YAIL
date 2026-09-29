@@ -1,4 +1,4 @@
-import { createIndexer } from "yail";
+import { createIndexer } from "@notuslabs/yail";
 import config from "../yail.config.js";
 import { onBitcoinTransaction, onTransaction, onTransfer } from "./handlers.js";
 import * as schema from "./schema.js";

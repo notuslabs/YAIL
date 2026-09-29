@@ -25,7 +25,7 @@ export interface TelemetryOptions {
  * Logs go through evlog's OTLP drain, configured by `observability.otlpEndpoint`.
  *
  * @example
- * import { startTelemetry } from "yail/otel";
+ * import { startTelemetry } from "@notuslabs/yail/otel";
  * const telemetry = startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:4318" });
  * process.on("SIGTERM", () => telemetry.shutdown());
  */

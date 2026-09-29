@@ -3,12 +3,12 @@
 **Y**et **A**nother **I**ndexer **L**ibrary. Ponder-style developer experience, [HyperSync](https://docs.envio.dev/docs/HyperSync/overview) as the primary EVM data source, [ClickHouse](https://clickhouse.com) as the only storage.
 
 ```sh
-pnpm add yail          # Node >= 20, ESM
+pnpm add @notuslabs/yail          # Node >= 20, ESM
 ```
 
 ```ts
 // yail.config.ts
-import { createConfig, hypersync, esplora, addressSet } from "yail";
+import { createConfig, hypersync, esplora, addressSet } from "@notuslabs/yail";
 import { erc20Abi } from "./abis";
 
 export default createConfig({
@@ -31,7 +31,7 @@ export default createConfig({
 
 ```ts
 // src/index.ts
-import { createIndexer } from "yail";
+import { createIndexer } from "@notuslabs/yail";
 import config from "../yail.config";
 import * as schema from "./schema";
 
@@ -87,7 +87,7 @@ The runtime only ever indexes blocks `<= head - finality` (default 20 blocks on 
 ### Schema
 
 ```ts
-import { t, table, materializedView, sql } from "yail";
+import { t, table, materializedView, sql } from "@notuslabs/yail";
 
 export const ledger = table("ledger", {
   chain: t.string().lowCardinality(),
@@ -183,7 +183,7 @@ Logs are [evlog](https://www.evlog.dev) wide events: one per batch (chain, block
 Export everything with one call:
 
 ```ts
-import { startTelemetry } from "yail/otel";
+import { startTelemetry } from "@notuslabs/yail/otel";
 startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:4318" }); // traces + metrics over OTLP/HTTP
 ```
 Set `observability.otlpEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to ship logs over OTLP too, and `observability.logsToClickHouse: true` to keep them in `_yail_logs` next to your data (zero extra infrastructure). Recent events are always available at `GET /_evlog/logs`.
@@ -193,7 +193,7 @@ HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up o
 ### Testing with real data
 
 ```ts
-import { startTestClickHouse, fixtureSource, readFixture } from "yail/testing";
+import { startTestClickHouse, fixtureSource, readFixture } from "@notuslabs/yail/testing";
 
 const ch = await startTestClickHouse();               // YAIL_TEST_CLICKHOUSE_URL or a testcontainer
 const fixture = readFixture("test/fixtures/base-univ3-weth-usdc.json");

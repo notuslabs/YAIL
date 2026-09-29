@@ -1,4 +1,4 @@
-import { t, table } from "yail";
+import { t, table } from "@notuslabs/yail";
 
 export const transfers = table(
   "transfers",

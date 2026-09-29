@@ -7,6 +7,12 @@
     "dev": "yail dev src/index.ts",
     "start": "yail start src/index.ts"
   },
-  "dependencies": { "viem": "^2.56.9", "yail": "workspace:*" },
-  "devDependencies": { "@types/node": "^24", "typescript": "^7.0.2" }
+  "dependencies": {
+    "viem": "^2.56.9",
+    "@notuslabs/yail": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^7.0.2"
+  }
 }

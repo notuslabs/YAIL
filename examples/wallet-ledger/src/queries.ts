@@ -1,4 +1,4 @@
-import { sql, type Db } from "yail";
+import { sql, type Db } from "@notuslabs/yail";
 import { ledger } from "./schema.js";
 
 /** Daily balance curve of one wallet per chain and asset, in the asset's smallest unit. Exact: computed from the ledger itself. */

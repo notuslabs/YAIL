@@ -1,4 +1,4 @@
-import { t, table } from "yail";
+import { t, table } from "@notuslabs/yail";
 
 /** One row per movement of value into or out of a registered wallet, in the asset's smallest unit. */
 export const ledger = table(

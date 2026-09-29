@@ -1,4 +1,4 @@
-import { addressSet, createConfig, esplora, hypersync } from "yail";
+import { addressSet, createConfig, esplora, hypersync } from "@notuslabs/yail";
 import { erc20Abi } from "./src/abis.js";
 
 // Nothing before these blocks is indexed. ENVIO_API_TOKEN is read from the environment.

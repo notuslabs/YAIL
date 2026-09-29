@@ -1,4 +1,4 @@
-import { createIndexer } from "yail";
+import { createIndexer } from "@notuslabs/yail";
 import config from "../yail.config.js";
 import { transfers } from "./schema.js";
 

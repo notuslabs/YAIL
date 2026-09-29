@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { addressSet, createConfig, createIndexer, sql, type DatabaseConfig, type Indexer } from "yail";
-import { fixtureSource, readFixture, startTestClickHouse, type BitcoinFixture, type EvmFixture } from "yail/testing";
+import { addressSet, createConfig, createIndexer, sql, type DatabaseConfig, type Indexer } from "@notuslabs/yail";
+import { fixtureSource, readFixture, startTestClickHouse, type BitcoinFixture, type EvmFixture } from "@notuslabs/yail/testing";
 import { erc20Abi } from "../src/abis.js";
 import { onBitcoinTransaction, onTransaction, onTransfer } from "../src/handlers.js";
 import { balanceSeries } from "../src/queries.js";

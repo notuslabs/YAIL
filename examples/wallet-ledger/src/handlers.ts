@@ -1,4 +1,4 @@
-import type { BitcoinAccountEvent, ContractEvent, EvmAccountEvent, HandlerContext } from "yail";
+import type { BitcoinAccountEvent, ContractEvent, EvmAccountEvent, HandlerContext } from "@notuslabs/yail";
 import type { erc20Abi } from "./abis.js";
 import { ledger } from "./schema.js";
 

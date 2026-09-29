@@ -10,12 +10,12 @@ importers:
 
   examples/quickstart:
     dependencies:
+      '@notuslabs/yail':
+        specifier: workspace:*
+        version: link:../../packages/yail
       viem:
         specifier: ^2.56.9
         version: 2.56.9(typescript@7.0.2)
-      yail:
-        specifier: workspace:*
-        version: link:../../packages/yail
     devDependencies:
       '@types/node':
         specifier: ^24
@@ -26,12 +26,12 @@ importers:
 
   examples/wallet-ledger:
     dependencies:
+      '@notuslabs/yail':
+        specifier: workspace:*
+        version: link:../../packages/yail
       viem:
         specifier: ^2.56.9
         version: 2.56.9(typescript@7.0.2)
-      yail:
-        specifier: workspace:*
-        version: link:../../packages/yail
     devDependencies:
       '@types/node':
         specifier: ^24

@@ -1,4 +1,4 @@
-import { addressSet, createConfig, parseAbi, rpc } from "yail";
+import { addressSet, createConfig, parseAbi, rpc } from "@notuslabs/yail";
 
 export const erc20Abi = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
 
