@@ -24,7 +24,15 @@ export function startTestClickHouse(options: { image?: string } = {}): Promise<T
   shared ??= (async () => {
     const envUrl = process.env.YAIL_TEST_CLICKHOUSE_URL;
     if (envUrl) return make(envUrl, async () => {});
-    const { ClickHouseContainer } = await import("@testcontainers/clickhouse");
+    let ClickHouseContainer: (typeof import("@testcontainers/clickhouse"))["ClickHouseContainer"];
+    try {
+      ({ ClickHouseContainer } = await import("@testcontainers/clickhouse"));
+    } catch (cause) {
+      throw new Error(
+        "startTestClickHouse(): install the optional peer dependency `@testcontainers/clickhouse` (and have Docker running), or point YAIL_TEST_CLICKHOUSE_URL at a running ClickHouse.",
+        { cause },
+      );
+    }
     const container = await new ClickHouseContainer(options.image ?? process.env.YAIL_TEST_CLICKHOUSE_IMAGE ?? "clickhouse/clickhouse-server:25.8")
       .withUsername("default")
       .withPassword("yail")

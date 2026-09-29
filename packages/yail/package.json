@@ -1,21 +1,67 @@
 {
   "name": "yail",
   "version": "0.1.0",
-  "description": "Yet Another Indexer Library: Ponder-like DX, HyperSync-first, ClickHouse-native blockchain indexer",
-  "type": "module",
+  "description": "Blockchain indexer with Ponder-style DX: HyperSync as the primary EVM source, Esplora for Bitcoin, ClickHouse as the only storage",
+  "keywords": [
+    "indexer",
+    "blockchain",
+    "ethereum",
+    "evm",
+    "bitcoin",
+    "hypersync",
+    "envio",
+    "clickhouse",
+    "ponder",
+    "web3"
+  ],
+  "homepage": "https://github.com/notuslabs/YAIL/tree/main/packages/yail#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/notuslabs/YAIL.git",
+    "directory": "packages/yail"
+  },
+  "bugs": {
+    "url": "https://github.com/notuslabs/YAIL/issues"
+  },
+  "author": "Thalles Passos",
   "license": "MIT",
-  "bin": { "yail": "./bin/yail.js" },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "yail": "./bin/yail.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./testing": { "types": "./dist/testing/index.d.ts", "default": "./dist/testing/index.js" },
-    "./otel": { "types": "./dist/observability/otel.d.ts", "default": "./dist/observability/otel.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./otel": {
+      "types": "./dist/observability/otel.d.ts",
+      "default": "./dist/observability/otel.js"
+    },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "bin", "README.md"],
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepack": "pnpm run clean && pnpm run build",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -30,13 +76,19 @@
     "@opentelemetry/resources": "^2.11.0",
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@opentelemetry/sdk-node": "^0.222.0",
-    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.37.0",
     "evlog": "^2.29.0",
     "hono": "^4.13.10",
     "tsx": "^4.23.15",
-    "viem": "^2.56.9",
-    "zod": "^4.6.5"
+    "viem": "^2.56.9"
+  },
+  "peerDependencies": {
+    "@testcontainers/clickhouse": ">=12"
+  },
+  "peerDependenciesMeta": {
+    "@testcontainers/clickhouse": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@testcontainers/clickhouse": "^12.2.0",

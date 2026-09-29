@@ -2,6 +2,10 @@
 
 **Y**et **A**nother **I**ndexer **L**ibrary. Ponder-style developer experience, [HyperSync](https://docs.envio.dev/docs/HyperSync/overview) as the primary EVM data source, [ClickHouse](https://clickhouse.com) as the only storage.
 
+```sh
+pnpm add yail          # Node >= 20, ESM
+```
+
 ```ts
 // yail.config.ts
 import { createConfig, hypersync, esplora, addressSet } from "yail";
