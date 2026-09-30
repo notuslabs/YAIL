@@ -86,7 +86,6 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
   const cfg: StreamConfig = {
     concurrency: options.concurrency ?? 8,
     responseBytesTarget: options.responseBytesTarget ?? 400_000,
-    hexOutput: "Prefixed",
   };
   const stream = await client.stream(hsQuery, cfg);
   let from = query.fromBlock;
