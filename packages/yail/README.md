@@ -128,7 +128,7 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
   context.addresses // has/register/list for address sets
   context.log       // evlog wide event of the current batch: log.set({ ... })
 });
-indexer.on("Wallets:transaction", ...) // EVM: { transaction, block, address, direction: "from"|"to"|"self" }
+indexer.on("Wallets:transaction", ...) // EVM: { transaction, block, address, direction, logs, traces }
                                       // Bitcoin: { tx, block, address, received, sent, net, fee, isSender }
 indexer.on("setup", ...)              // once per chain before indexing starts
 ```
@@ -136,6 +136,21 @@ indexer.on("setup", ...)              // once per chain before indexing starts
 Writes are buffered per source batch and flushed as one INSERT per table before the checkpoint is written. Events are processed in `(block, txIndex, logIndex)` order per chain; chains run concurrently. Only events with a registered handler are fetched from the source.
 
 `context.db.find(table, key)` looks at the current batch's buffer first, then ClickHouse. It is fine for last-value state (a pool's current tick), but the ClickHouse way is to write immutable facts and let `SummingMergeTree`/`AggregatingMergeTree` materialized views maintain aggregates.
+
+### Wallet activity
+
+An account normally matches the transactions an address sends or receives. With `activity: true` it matches every
+transaction that mentions the address: in any indexed log topic (token transfers, user operations, approvals…) or as the
+sender or recipient of a call trace. The event then carries the whole transaction: `event.logs` (all of its logs) and
+`event.traces` (all of its call frames), one event per transaction and address.
+
+```ts
+accounts: { Wallets: { chain: "base", address: addressSet("wallets"), activity: true } },
+```
+
+Traces come only from trace-enabled HyperSync endpoints (e.g. `https://eth-traces.hypersync.xyz`,
+`https://base-traces.hypersync.xyz`, a paid add-on); elsewhere `event.traces` is empty. Needs HyperSync (`rpc()` refuses
+whole-transaction queries).
 
 ### Dynamic addresses and backfill
 
@@ -221,6 +236,6 @@ yail status              --url http://localhost:42069
 ## Limits and notes
 
 - Bitcoin is scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs.
-- Traces / internal ETH transfers are not indexed (not exposed by HyperSync on most chains without a paid add-on).
+- Internal ETH transfers are only visible through traces, which HyperSync serves on a few chains as a paid add-on (see Wallet activity).
 - ClickHouse has no transactions: a crash between a table flush and the checkpoint is repaired by the ReplacingMergeTree key on the next run, so give every table a real identity key.
 - Cross-chain ordering is not enforced (chains are independent loops).

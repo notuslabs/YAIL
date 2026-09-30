@@ -8,12 +8,12 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, BitcoinSource, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTransaction } from "../sources/types.js";
+import type { BitcoinBatch, BitcoinSource, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type HandlerContext } from "./context.js";
-import { bitcoinAccountEvent, decodeLog, logMatchesFilter, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent } from "./events.js";
+import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent } from "./events.js";
 import { buildBitcoinQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
 import type { BitcoinQuery, EvmQuery } from "../sources/types.js";
 import { toArray } from "../util.js";
@@ -448,6 +448,8 @@ export class ChainRunner {
       }
     }
 
+    const logsOf = byTransaction([...batch.logs].sort(logOrder));
+    const tracesOf = byTransaction(batch.traces ?? []);
     for (const a of this.plan.accounts) {
       const name = `${a.name}:transaction`;
       if (!this.deps.handlers.has(name)) continue;
@@ -455,16 +457,19 @@ export class ChainRunner {
       const members = new Set(resolved.addresses);
       for (const tx of batch.transactions) {
         if (tx.blockNumber < a.startBlock || (a.endBlock !== undefined && tx.blockNumber > a.endBlock)) continue;
-        const fromIn = members.has(tx.from);
-        const toIn = tx.to !== null && members.has(tx.to);
-        if (!fromIn && !toIn) continue;
-        const block = await this.blockOf(blocks, tx.blockNumber);
-        if (fromIn && toIn && tx.from === tx.to) {
-          events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, payload: { address: tx.from, direction: "self", transaction: tx, block } });
-          continue;
+        let logs: EvmLog[] = [];
+        let traces: EvmTrace[] = [];
+        if (a.activity) {
+          logs = logsOf.get(tx.hash) ?? [];
+          traces = tracesOf.get(tx.hash) ?? [];
         }
-        if (fromIn) events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, payload: { address: tx.from, direction: "from", transaction: tx, block } });
-        if (toIn) events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, payload: { address: tx.to!, direction: "to", transaction: tx, block } });
+        const accounts = involvedAddresses(tx, logs, traces).filter((address) => members.has(address));
+        if (accounts.length === 0) continue;
+        const block = await this.blockOf(blocks, tx.blockNumber);
+        for (const address of accounts) {
+          const payload: EvmAccountEvent = { address, direction: directionOf(tx, address), transaction: tx, block, logs, traces };
+          events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, payload });
+        }
       }
     }
 
@@ -567,6 +572,16 @@ function describeEvent(e: DispatchEvent): Record<string, unknown> {
   if (p.transaction) return { block: e.block, tx: p.transaction.hash, address: p.address };
   if (p.tx) return { block: e.block, txid: p.tx.txid, address: p.address };
   return { block: e.block };
+}
+
+function byTransaction<T extends { transactionHash: string }>(items: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const group = groups.get(item.transactionHash) ?? [];
+    group.push(item);
+    groups.set(item.transactionHash, group);
+  }
+  return groups;
 }
 
 function hashIndex(txid: string): number {

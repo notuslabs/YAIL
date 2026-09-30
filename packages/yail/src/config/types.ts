@@ -64,6 +64,12 @@ export interface AccountConfig {
   address: AddressSpec;
   startBlock?: BlockRef;
   endBlock?: number;
+  /**
+   * Also match transactions that only mention the address: in an indexed log topic or as a call trace's
+   * sender or recipient (traces need a trace-enabled source). Events then carry every log and trace of the
+   * transaction. EVM only; needs HyperSync.
+   */
+  activity?: boolean;
 }
 
 export interface AddressSetConfig {

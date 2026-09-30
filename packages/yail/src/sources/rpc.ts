@@ -60,6 +60,7 @@ export function rpc(options: RpcSourceOptions): EvmSource {
   };
 
   async function fetchRange(from: number, to: number, query: EvmQuery): Promise<EvmBatch> {
+    if (query.join) throw new Error("rpc(): whole-transaction queries (accounts with `activity: true`) need a HyperSync source");
     const logs: EvmLog[] = [];
     const seenLogs = new Set<string>();
     for (const f of query.logs) {

@@ -1,5 +1,5 @@
 import { encodeAbiParameters, keccak256, toHex } from "viem";
-import type { EvmBlock, EvmFixture, EvmLog, EvmTransaction } from "../src/sources/index.js";
+import type { EvmBlock, EvmFixture, EvmLog, EvmTrace, EvmTransaction } from "../src/sources/index.js";
 import { padAddress } from "../src/indexer/events.js";
 
 export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -22,6 +22,7 @@ export class FixtureBuilder {
   blocks: EvmBlock[] = [];
   transactions: EvmTransaction[] = [];
   logs: EvmLog[] = [];
+  traces: EvmTrace[] = [];
   private logIndexByBlock = new Map<number, number>();
   private txIndexByBlock = new Map<number, number>();
 
@@ -59,6 +60,13 @@ export class FixtureBuilder {
     return log;
   }
 
+  /** A call frame of `tx` (the root frame is `traceAddress: []`). */
+  trace(tx: EvmTransaction, from: string, to: string, value: bigint, traceAddress: number[]): EvmTrace {
+    const trace: EvmTrace = { transactionHash: tx.hash, blockNumber: tx.blockNumber, traceAddress, type: "call", callType: "call", from: from.toLowerCase(), to: to.toLowerCase(), value };
+    this.traces.push(trace);
+    return trace;
+  }
+
   poolCreated(block: number, factory: string, token0: string, token1: string, fee: number, pool: string): EvmLog {
     const t = this.tx(block, addr(0xdead), factory, 0n);
     const log: EvmLog = {
@@ -76,6 +84,6 @@ export class FixtureBuilder {
   }
 
   build(name = "synthetic"): EvmFixture {
-    return { version: 1, kind: "evm", name, chainId: 1337, height: this.height, fromBlock: this.blocks[0]!.number, toBlock: this.height + 1, blocks: this.blocks, transactions: this.transactions, logs: this.logs };
+    return { version: 1, kind: "evm", name, chainId: 1337, height: this.height, fromBlock: this.blocks[0]!.number, toBlock: this.height + 1, blocks: this.blocks, transactions: this.transactions, logs: this.logs, traces: this.traces };
   }
 }

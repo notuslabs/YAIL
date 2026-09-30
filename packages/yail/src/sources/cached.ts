@@ -115,7 +115,7 @@ function untagBigint(_key: string, value: unknown): unknown {
 function clampBatch(batch: RangeBatch, next: number): RangeBatch {
   if (batch.nextBlock === next) return batch;
   const b: any = { ...batch, nextBlock: next };
-  for (const key of ["blocks", "transactions", "logs"]) {
+  for (const key of ["blocks", "transactions", "logs", "traces"]) {
     if (Array.isArray(b[key])) b[key] = b[key].filter((x: any) => (x.number ?? x.blockNumber) < next);
   }
   return b;

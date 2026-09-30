@@ -119,6 +119,19 @@ describe("plan", () => {
     expect(q.transactions).toEqual([{ from: ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }, { to: ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }]);
   });
 
+  it("matches activity accounts through log topics and traces, and asks for whole transactions", async () => {
+    const registry = new AddressRegistry(fakeDb, (_c, a) => a.toLowerCase());
+    await registry.register({ set: "wallets", chain: "base", address: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", status: "live", adoptedAtBlock: 1 });
+    const activity = createConfig({ ...config, accounts: { Wallets: { chain: "base", address: addressSet("wallets"), activity: true } } });
+    const plan = buildPlans(activity, { handled: new Set(["Wallets:transaction"]), resolveLatest: () => 100 }).get("base")!;
+    const q = buildEvmQuery(plan, 0, 100, registry);
+    const wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const padded = padAddress(wallet);
+    expect(q.logs).toEqual([{ topics: [null, [padded]] }, { topics: [null, null, [padded]] }, { topics: [null, null, null, [padded]] }]);
+    expect(q.traces).toEqual([{ from: [wallet] }, { to: [wallet] }]);
+    expect(q.join).toBe(true);
+  });
+
   it("skips empty address sets instead of matching everything", () => {
     const registry = new AddressRegistry(fakeDb, (_c, a) => a.toLowerCase());
     const plans = buildPlans(config, { handled: new Set(["Erc20:Transfer"]), resolveLatest: () => 100 });

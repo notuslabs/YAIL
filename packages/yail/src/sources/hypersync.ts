@@ -1,5 +1,5 @@
-import { HypersyncClient, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock } from "@envio-dev/hypersync-client";
-import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, FetchOptions } from "./types.js";
+import { HypersyncClient, JoinMode, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TraceField, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock, type Trace as HsTrace } from "@envio-dev/hypersync-client";
+import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, FetchOptions } from "./types.js";
 import { lower } from "./types.js";
 import { lowerOrNull } from "../util.js";
 
@@ -21,6 +21,7 @@ export interface HypersyncOptions {
 const BLOCK_FIELDS = ["Number", "Hash", "ParentHash", "Timestamp"] as const;
 const LOG_FIELDS = ["BlockNumber", "BlockHash", "TransactionHash", "TransactionIndex", "LogIndex", "Address", "Data", "Topic0", "Topic1", "Topic2", "Topic3", "Removed"] as const;
 const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "Status", "Type", "ContractAddress"] as const;
+const TRACE_FIELDS = ["TransactionHash", "BlockNumber", "TraceAddress", "Type", "CallType", "From", "To", "Value", "Error"] as const;
 
 export function hypersync(options: HypersyncOptions): EvmSource {
   let client: HypersyncClient | undefined;
@@ -110,12 +111,14 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
 }
 
 export function toHypersyncQuery(query: EvmQuery): Query {
-  const wantTx = query.transactions.length > 0 || query.includeLogTransactions;
+  const traces = query.traces ?? [];
   const logFields: LogField[] = [];
-  if (query.logs.length > 0) logFields.push(...LOG_FIELDS);
+  if (query.logs.length > 0 || query.join) logFields.push(...LOG_FIELDS);
   const txFields: TransactionField[] = [];
-  if (wantTx) txFields.push(...TX_FIELDS);
-  return {
+  if (query.transactions.length > 0 || query.includeLogTransactions || query.join) txFields.push(...TX_FIELDS);
+  const traceFields: TraceField[] = [];
+  if (traces.length > 0 || query.join) traceFields.push(...TRACE_FIELDS);
+  const hsQuery: Query = {
     fromBlock: query.fromBlock,
     toBlock: query.toBlock,
     logs: query.logs.map((f) => {
@@ -124,8 +127,12 @@ export function toHypersyncQuery(query: EvmQuery): Query {
       return filter;
     }),
     transactions: query.transactions.map((f) => ({ from: f.from?.map(lower), to: f.to?.map(lower) })),
-    fieldSelection: { block: [...BLOCK_FIELDS], log: logFields, transaction: txFields },
+    traces: traces.map((f) => ({ from: f.from?.map(lower), to: f.to?.map(lower) })),
+    fieldSelection: { block: [...BLOCK_FIELDS], log: logFields, transaction: txFields, trace: traceFields },
   };
+  // JoinAll: every log and trace of each matched transaction, not only the matching ones.
+  if (query.join) hsQuery.joinMode = JoinMode.JoinAll;
+  return hsQuery;
 }
 
 function toBatch(res: QueryResponse, fromBlock: number, nextBlock: number): EvmBatch {
@@ -135,6 +142,7 @@ function toBatch(res: QueryResponse, fromBlock: number, nextBlock: number): EvmB
     blocks: res.data.blocks.map(toBlock),
     transactions: res.data.transactions.map(toTransaction),
     logs: res.data.logs.map(toLog),
+    traces: (res.data.traces ?? []).map(toTrace),
     archiveHeight: res.archiveHeight,
   };
   const guard = res.rollbackGuard;
@@ -159,6 +167,20 @@ function toLog(l: HsLog): EvmLog {
     data: l.data ?? "0x",
     topics: l.topics.filter((t): t is string => typeof t === "string" && t.length > 0),
     removed: l.removed,
+  };
+}
+
+function toTrace(t: HsTrace): EvmTrace {
+  return {
+    transactionHash: t.transactionHash!,
+    blockNumber: t.blockNumber!,
+    traceAddress: t.traceAddress ?? [],
+    type: t.type ?? "call",
+    callType: t.callType,
+    from: lower(t.from ?? ""),
+    to: lowerOrNull(t.to),
+    value: t.value ?? 0n,
+    error: t.error,
   };
 }
 

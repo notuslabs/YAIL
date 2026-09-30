@@ -98,6 +98,46 @@ async function balances(indexer: ReturnType<typeof makeIndexer>["indexer"]) {
   return Object.fromEntries(rows.map((r) => [r.wallet, { total: BigInt(r.total), n: Number(r.n) }]));
 }
 
+describe("activity accounts", () => {
+  const ROUTER = addr(0x500);
+  const activity = table("activity", { wallet: t.address(), txHash: t.hash(), direction: t.string(), logs: t.uint32(), traces: t.uint32() }, { orderBy: ["wallet", "txHash"] });
+
+  it("delivers every transaction that mentions a wallet, whole, once per wallet", async () => {
+    const fb = new FixtureBuilder(20);
+    const inLog = fb.tx(5, OTHER, ROUTER, 0n);
+    fb.transfer(5, TOKEN, OTHER, W1, 10n, inLog); // W1 only appears in a log topic
+    fb.transfer(5, TOKEN, addr(0x10), addr(0x11), 1n, inLog); // unrelated log of the same transaction
+    const inTrace = fb.tx(6, OTHER, ROUTER, 0n);
+    fb.trace(inTrace, OTHER, ROUTER, 0n, []);
+    fb.trace(inTrace, ROUTER, W2, 7n, [0]); // W2 only receives through an internal call
+    const direct = fb.tx(7, W1, OTHER, 3n);
+    fb.transfer(8, TOKEN, addr(0x10), addr(0x11), 1n); // touches no wallet
+    const config = createConfig({
+      database: ch.database(),
+      chains: { test: { id: 1337, source: fixtureSource(fb.build()), finality: 0 } },
+      addressSets: { wallets: { initial: [W1, W2] } },
+      accounts: { Wallets: { chain: "test", address: addressSet("wallets"), startBlock: 0, activity: true } },
+      server: { port: false },
+      observability: { pretty: false },
+    });
+    const indexer = createIndexer({ config, schema: { activity } });
+    indexer.on("Wallets:transaction", async ({ event, context }) => {
+      context.db.insert(activity).values({ wallet: event.address, txHash: event.transaction.hash, direction: event.direction, logs: event.logs.length, traces: event.traces.length });
+    });
+    await indexer.run();
+    const rows = await indexer.db.rows(activity);
+    expect(rows).toHaveLength(3);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { wallet: W1, txHash: inLog.hash, direction: "activity", logs: 2, traces: 0 },
+        { wallet: W1, txHash: direct.hash, direction: "from", logs: 0, traces: 0 },
+        { wallet: W2, txHash: inTrace.hash, direction: "activity", logs: 0, traces: 2 },
+      ]),
+    );
+    await indexer.db.close();
+  });
+});
+
 describe("indexer end-to-end (synthetic fixture)", () => {
   let database: ReturnType<TestClickHouse["database"]>;
   let indexer: ReturnType<typeof makeIndexer>["indexer"];

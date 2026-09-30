@@ -10,7 +10,7 @@ export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index
 
 // Sources
 export { hypersync, rpc, cached, esplora, fixtureSource } from "./sources/index.js";
-export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, BitcoinQuery, BitcoinBatch, BitcoinTransaction, HypersyncOptions, RpcSourceOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
+export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, HypersyncOptions, RpcSourceOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";
