@@ -20,7 +20,7 @@ export interface HypersyncOptions {
 
 const BLOCK_FIELDS = ["Number", "Hash", "ParentHash", "Timestamp"] as const;
 const LOG_FIELDS = ["BlockNumber", "BlockHash", "TransactionHash", "TransactionIndex", "LogIndex", "Address", "Data", "Topic0", "Topic1", "Topic2", "Topic3", "Removed"] as const;
-const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "Status", "Type", "ContractAddress"] as const;
+const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "L1Fee", "Status", "Type", "ContractAddress"] as const;
 const TRACE_FIELDS = ["TransactionHash", "BlockNumber", "TraceAddress", "Type", "CallType", "From", "To", "Value", "Error"] as const;
 
 export function hypersync(options: HypersyncOptions): EvmSource {
@@ -207,6 +207,7 @@ function toTransaction(t: HsTx): EvmTransaction {
     gasPrice: t.gasPrice,
     gasUsed: t.gasUsed,
     effectiveGasPrice: t.effectiveGasPrice,
+    l1Fee: t.l1Fee,
     status: t.status,
     type: t.type,
     contractAddress: t.contractAddress ?? null,

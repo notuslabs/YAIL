@@ -75,6 +75,8 @@ export interface EvmTransaction {
   gasPrice?: bigint;
   gasUsed?: bigint;
   effectiveGasPrice?: bigint;
+  /** OP-stack chains: the L1 data fee, paid on top of `gasUsed * effectiveGasPrice`. */
+  l1Fee?: bigint;
   status?: number;
   type?: number;
   contractAddress?: string | null;
