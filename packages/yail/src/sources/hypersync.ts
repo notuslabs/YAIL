@@ -75,7 +75,7 @@ async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuer
   let from = query.fromBlock;
   while (from < query.toBlock) {
     fetchOptions?.signal?.throwIfAborted();
-    const res = await client.get({ ...hsQuery, fromBlock: from });
+    const res = await getFrom(client, hsQuery, from);
     const next = Math.min(res.nextBlock, query.toBlock);
     if (next <= from) throw new Error(`hypersync: nextBlock ${res.nextBlock} did not advance from ${from}`);
     yield toBatch(res, from, next);
@@ -107,6 +107,15 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
   // The stream API is allowed to stop early (server-side limits); cover the remainder with plain gets.
   if (from < query.toBlock) {
     yield* getRange(client, hsQuery, { ...query, fromBlock: from }, fetchOptions);
+  }
+}
+
+/** Near the head, a server behind the reported height can answer without advancing: ask again before giving up. */
+async function getFrom(client: HypersyncClient, hsQuery: Query, from: number): Promise<QueryResponse> {
+  for (let attempt = 1; ; attempt++) {
+    const res = await client.get({ ...hsQuery, fromBlock: from });
+    if (res.nextBlock > from || attempt === 5) return res;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
   }
 }
 
