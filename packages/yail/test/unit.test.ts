@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseAbi } from "viem";
-import { t, table, materializedView, tableDdl, materializedViewDdl } from "../src/schema/index.js";
+import { t, table, materializedView, tableDdl, materializedViewDdl, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
 import { serializeRow, deserializeRow } from "../src/db/serialize.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -50,6 +50,13 @@ describe("schema", () => {
     expect(ddl).toContain("CREATE MATERIALIZED VIEW IF NOT EXISTS `db`.`ledger_daily_mv` TO `db`.`daily` AS");
     expect(ddl).toContain("FROM `db`.`ledger`");
     expect(tableDdl(daily)).toContain("ENGINE = SummingMergeTree()");
+  });
+
+  it("renders plain views that read tables and earlier views", () => {
+    const balances = view("balances", sql`SELECT wallet, sum(amount) AS balance FROM ${ledger} FINAL GROUP BY wallet`);
+    const rich = view("rich", sql`SELECT * FROM ${balances} WHERE balance > ${1000n}`);
+    expect(viewDdl(balances, "db")).toContain("CREATE OR REPLACE VIEW `db`.`balances` AS\nSELECT wallet, sum(amount) AS balance FROM `db`.`ledger` FINAL");
+    expect(viewDdl(rich, "db")).toContain("FROM `db`.`balances` WHERE balance > 1000");
   });
 
   it("serializes and deserializes rows", () => {

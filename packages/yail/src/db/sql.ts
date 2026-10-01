@@ -1,11 +1,12 @@
 import { isTable, type Table } from "../schema/table.js";
+import { isView, type View } from "../schema/view.js";
 
 export type SqlValue = string | number | bigint | boolean | Date | null | undefined | SqlValue[];
 
 export interface SqlFragment {
   readonly __brand: "yail.sql";
   readonly strings: ReadonlyArray<string>;
-  readonly values: ReadonlyArray<SqlValue | SqlFragment | Table<any> | SqlRaw>;
+  readonly values: ReadonlyArray<SqlValue | SqlFragment | Table<any> | View | SqlRaw>;
 }
 
 export interface SqlRaw {
@@ -83,7 +84,7 @@ export function renderSql(input: SqlFragment | string, options: RenderOptions = 
   const renderValue = (v: SqlFragment["values"][number]): string => {
     if (isSqlFragment(v)) return render(v);
     if (isRaw(v)) return v.text;
-    if (isTable(v)) return qualify(v.name, options.database);
+    if (isTable(v) || isView(v)) return qualify(v.name, options.database);
     if (options.inline) return literal(v as SqlValue);
     const name = next();
     const { type, value } = paramType(v as SqlValue);

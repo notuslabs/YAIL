@@ -3,8 +3,8 @@ export { createConfig, addressSet, factory } from "./config/index.js";
 export type { Config, ChainConfig, ContractConfig, AccountConfig, EventFilter, AddressSpec, AddressSetRef, FactoryRef, CacheConfig, ObservabilityConfig, ServerConfig, IndexingConfig, AddressSetConfig } from "./config/index.js";
 
 // Schema + database
-export { t, table, materializedView, tableDdl, materializedViewDdl } from "./schema/index.js";
-export type { Table, TableOptions, TableEngine, Column, InsertRow, InferRow, MaterializedView } from "./schema/index.js";
+export { t, table, materializedView, view, tableDdl, materializedViewDdl, viewDdl } from "./schema/index.js";
+export type { Table, TableOptions, TableEngine, Column, InsertRow, InferRow, MaterializedView, View } from "./schema/index.js";
 export { createDb, sql, migrate, schemaDdl, BatchWriter, internalTables } from "./db/index.js";
 export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index.js";
 

@@ -3,7 +3,7 @@ import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.j
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
 import { sql } from "../src/db/sql.js";
-import { t, table, materializedView } from "../src/schema/index.js";
+import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
 import { createHttpClient } from "../src/http/client.js";
 
@@ -14,6 +14,7 @@ const events = table(
 );
 const totals = table("totals", { wallet: t.address(), amount: t.int256() }, { orderBy: ["wallet"], engine: "SummingMergeTree", indexMeta: false });
 const totalsMv = materializedView("totals_mv", { from: events, to: totals, query: sql`SELECT wallet, sum(amount) AS amount FROM ${events} GROUP BY wallet` });
+const balances = view("balances", sql`SELECT wallet, sum(amount) AS amount FROM ${events} FINAL GROUP BY wallet`);
 
 let ch: TestClickHouse;
 let db: Db;
@@ -21,7 +22,7 @@ let db: Db;
 beforeAll(async () => {
   ch = await startTestClickHouse();
   db = createDb(ch.database());
-  await migrate(db, { events, totals, totalsMv });
+  await migrate(db, { events, totals, totalsMv, balances });
 });
 afterAll(async () => {
   await db?.close();
@@ -50,6 +51,12 @@ describe("clickhouse", () => {
     const rows = await db.query<{ wallet: string; amount: string }>(sql`SELECT wallet, sum(amount) AS amount FROM ${totals} GROUP BY wallet`);
     // MV saw both inserts of row 1 (10 and 11) plus -3: 18. This is why aggregates should be keyed by immutable rows.
     expect(rows).toEqual([{ wallet: "0xaaa", amount: "18" }]);
+  });
+
+  it("serves plain views computed at read time, after dedup", async () => {
+    // Same rows as the materialized view above, but read through FINAL: 11 - 3, not 18.
+    expect(await db.query(sql`SELECT wallet, amount FROM ${balances}`)).toEqual([{ wallet: "0xaaa", amount: "8" }]);
+    await migrate(db, { events, totals, totalsMv, balances }); // re-running migrate replaces the view in place
   });
 
   it("batch writer flushes per table and answers peek()", async () => {

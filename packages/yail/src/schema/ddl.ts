@@ -1,6 +1,6 @@
 import { columnTypeSql } from "./column.js";
 import { INDEX_META_COLUMNS, type Table } from "./table.js";
-import type { MaterializedView } from "./view.js";
+import type { MaterializedView, View } from "./view.js";
 import { qualify, renderSql } from "../db/sql.js";
 
 export { qualify };
@@ -46,6 +46,12 @@ export function tableDdl(table: Table<any>, database?: string): string {
 export function materializedViewDdl(view: MaterializedView, database?: string): string {
   const { text } = renderSql(view.query, { inline: true, database });
   return `CREATE MATERIALIZED VIEW IF NOT EXISTS ${qualify(view.name, database)} TO ${qualify(view.to.name, database)} AS\n${text}`;
+}
+
+/** `CREATE OR REPLACE`: a plain view holds no data, so every migrate applies its current query. */
+export function viewDdl(view: View, database?: string): string {
+  const { text } = renderSql(view.query, { inline: true, database });
+  return `CREATE OR REPLACE VIEW ${qualify(view.name, database)} AS\n${text}`;
 }
 
 /** One-off backfill of a materialized view's target from existing source data. */

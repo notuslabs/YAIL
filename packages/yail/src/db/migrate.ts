@@ -1,18 +1,23 @@
-import { isMaterializedView, isTable, materializedViewDdl, materializedViewPopulateSql, tableDdl, type MaterializedView, type Table } from "../schema/index.js";
+import { isMaterializedView, isTable, isView, materializedViewDdl, materializedViewPopulateSql, tableDdl, viewDdl, type MaterializedView, type Table, type View } from "../schema/index.js";
 import type { Db } from "./client.js";
 import { INTERNAL_TABLES } from "./internal.js";
 
 export type SchemaModule = Record<string, unknown>;
 
-export function collectSchema(schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>): {
+type SchemaItem = Table<any> | MaterializedView | View;
+
+export function collectSchema(schema: SchemaModule | ReadonlyArray<SchemaItem>): {
   tables: Table<any>[];
   views: MaterializedView[];
+  /** Plain views, in declaration order (a view may read an earlier one). */
+  plainViews: View[];
 } {
   let values: unknown[];
   if (Array.isArray(schema)) values = [...schema];
   else values = Object.values(schema as SchemaModule);
   const tables: Table<any>[] = [];
   const views: MaterializedView[] = [];
+  const plainViews = values.filter(isView);
   const seen = new Set<string>();
   for (const v of values) {
     if (isTable(v) && !seen.has(v.name)) {
@@ -26,7 +31,7 @@ export function collectSchema(schema: SchemaModule | ReadonlyArray<Table<any> | 
       }
     }
   }
-  return { tables, views };
+  return { tables, views, plainViews };
 }
 
 export interface MigrateOptions {
@@ -41,9 +46,9 @@ export interface MigrateOptions {
  * Create the database, internal bookkeeping tables, user tables and
  * materialized views. Idempotent (`CREATE ... IF NOT EXISTS`).
  */
-export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>, options: MigrateOptions = {}): Promise<void> {
+export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<SchemaItem>, options: MigrateOptions = {}): Promise<void> {
   const log = options.log ?? (() => {});
-  const { tables, views } = collectSchema(schema);
+  const { tables, views, plainViews } = collectSchema(schema);
 
   await db.createDatabase();
 
@@ -52,6 +57,10 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Table
   }
 
   if (options.reset) {
+    for (const v of [...plainViews].reverse()) {
+      log(`drop view ${v.name}`);
+      await db.command(`DROP VIEW IF EXISTS \`${db.database}\`.\`${v.name}\``);
+    }
     for (const v of views) {
       log(`drop view ${v.name}`);
       await db.command(`DROP VIEW IF EXISTS \`${db.database}\`.\`${v.name}\``);
@@ -70,6 +79,10 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Table
     log(`create materialized view ${v.name}`);
     await db.command(materializedViewDdl(v, db.database));
   }
+  for (const v of plainViews) {
+    log(`create view ${v.name}`);
+    await db.command(viewDdl(v, db.database));
+  }
   if (options.populate) {
     for (const v of views) {
       log(`populate ${v.name} -> ${v.to.name}`);
@@ -79,11 +92,12 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Table
 }
 
 /** Ordered DDL statements, useful for review or applying with another tool. */
-export function schemaDdl(schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>, database?: string): string[] {
-  const { tables, views } = collectSchema(schema);
+export function schemaDdl(schema: SchemaModule | ReadonlyArray<SchemaItem>, database?: string): string[] {
+  const { tables, views, plainViews } = collectSchema(schema);
   return [
     ...INTERNAL_TABLES.map((t) => tableDdl(t, database)),
     ...tables.map((t) => tableDdl(t, database)),
     ...views.map((v) => materializedViewDdl(v, database)),
+    ...plainViews.map((v) => viewDdl(v, database)),
   ];
 }

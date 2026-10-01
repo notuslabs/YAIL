@@ -30,3 +30,19 @@ export function materializedView(
 export function isMaterializedView(v: unknown): v is MaterializedView {
   return typeof v === "object" && v !== null && (v as MaterializedView).__brand === "yail.materializedView";
 }
+
+/** A plain ClickHouse view: a named SELECT run on every read, so it never drifts from the tables it reads. */
+export interface View {
+  readonly __brand: "yail.view";
+  readonly name: string;
+  readonly query: SqlFragment;
+}
+
+export function view(name: string, query: SqlFragment): View {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error(`Invalid view name "${name}"`);
+  return { __brand: "yail.view", name, query };
+}
+
+export function isView(v: unknown): v is View {
+  return typeof v === "object" && v !== null && (v as View).__brand === "yail.view";
+}

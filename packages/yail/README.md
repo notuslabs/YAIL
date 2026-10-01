@@ -114,6 +114,9 @@ export const dailyMv = materializedView("wallet_daily_mv", {
 - Every table gets three hidden columns (`_yail_chain`, `_yail_block`, `_yail_version`). They make re-indexing and versioned dedup work. Opt out with `indexMeta: false` for aggregate targets.
 - Default engine is `ReplacingMergeTree(_yail_version)`: re-inserting a row with the same key (re-run, backfill overlap, crash replay) never double counts. Read with `FINAL` (`db.rows()` does) or let merges settle.
 - Materialized views are first class: created by `yail migrate`, backfilled over existing data with `yail migrate --populate`.
+  They sum rows as they are inserted, before dedup, so a re-insert (replay, re-index) counts twice.
+- Plain views (``view("balances", sql`SELECT … FROM ${ledger} FINAL …`)``) hold no data: they run on every read, so they
+  always agree with their tables. `yail migrate` creates or replaces them; a view may read tables and earlier views.
 
 ### Handlers
 
