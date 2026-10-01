@@ -1,6 +1,7 @@
 import { isMaterializedView, isTable, isView, materializedViewDdl, materializedViewPopulateSql, tableDdl, viewDdl, type MaterializedView, type Table, type View } from "../schema/index.js";
 import type { Db } from "./client.js";
 import { INTERNAL_TABLES } from "./internal.js";
+import { isSqlFragment, type SqlFragment } from "./sql.js";
 
 export type SchemaModule = Record<string, unknown>;
 
@@ -9,7 +10,7 @@ type SchemaItem = Table<any> | MaterializedView | View;
 export function collectSchema(schema: SchemaModule | ReadonlyArray<SchemaItem>): {
   tables: Table<any>[];
   views: MaterializedView[];
-  /** Plain views, in declaration order (a view may read an earlier one). */
+  /** Plain views, each after the views it reads. */
   plainViews: View[];
 } {
   let values: unknown[];
@@ -17,7 +18,7 @@ export function collectSchema(schema: SchemaModule | ReadonlyArray<SchemaItem>):
   else values = Object.values(schema as SchemaModule);
   const tables: Table<any>[] = [];
   const views: MaterializedView[] = [];
-  const plainViews = values.filter(isView);
+  const plainViews = inCreationOrder(values.filter(isView));
   const seen = new Set<string>();
   for (const v of values) {
     if (isTable(v) && !seen.has(v.name)) {
@@ -32,6 +33,23 @@ export function collectSchema(schema: SchemaModule | ReadonlyArray<SchemaItem>):
     }
   }
   return { tables, views, plainViews };
+}
+
+/** Views a query interpolates, directly or through nested fragments. */
+function viewsIn(fragment: SqlFragment): View[] {
+  return [...fragment.values.filter(isView), ...fragment.values.filter(isSqlFragment).flatMap(viewsIn)];
+}
+
+/** Dependencies first, whatever the export order (`import * as schema` sorts names). */
+function inCreationOrder(views: View[]): View[] {
+  const ordered = new Set<View>();
+  const visit = (view: View) => {
+    if (ordered.has(view)) return;
+    viewsIn(view.query).forEach(visit);
+    ordered.add(view);
+  };
+  views.forEach(visit);
+  return [...ordered];
 }
 
 export interface MigrateOptions {

@@ -15,6 +15,7 @@ const events = table(
 const totals = table("totals", { wallet: t.address(), amount: t.int256() }, { orderBy: ["wallet"], engine: "SummingMergeTree", indexMeta: false });
 const totalsMv = materializedView("totals_mv", { from: events, to: totals, query: sql`SELECT wallet, sum(amount) AS amount FROM ${events} GROUP BY wallet` });
 const balances = view("balances", sql`SELECT wallet, sum(amount) AS amount FROM ${events} FINAL GROUP BY wallet`);
+const positive = view("positive", sql`SELECT * FROM ${balances} WHERE amount > ${0n}`);
 
 let ch: TestClickHouse;
 let db: Db;
@@ -22,7 +23,7 @@ let db: Db;
 beforeAll(async () => {
   ch = await startTestClickHouse();
   db = createDb(ch.database());
-  await migrate(db, { events, totals, totalsMv, balances });
+  await migrate(db, { positive, events, totals, totalsMv, balances }); // a view listed before the view it reads
 });
 afterAll(async () => {
   await db?.close();
@@ -56,7 +57,8 @@ describe("clickhouse", () => {
   it("serves plain views computed at read time, after dedup", async () => {
     // Same rows as the materialized view above, but read through FINAL: 11 - 3, not 18.
     expect(await db.query(sql`SELECT wallet, amount FROM ${balances}`)).toEqual([{ wallet: "0xaaa", amount: "8" }]);
-    await migrate(db, { events, totals, totalsMv, balances }); // re-running migrate replaces the view in place
+    expect(await db.query(sql`SELECT wallet FROM ${positive}`)).toEqual([{ wallet: "0xaaa" }]);
+    await migrate(db, { positive, events, totals, totalsMv, balances }); // re-running migrate replaces the views in place
   });
 
   it("batch writer flushes per table and answers peek()", async () => {
