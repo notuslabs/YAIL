@@ -43,6 +43,9 @@ interface DispatchEvent {
   payload: ContractEvent | EvmAccountEvent | BitcoinAccountEvent;
 }
 
+/** Thrown by `step` when the loop is done (`once`, or past `endBlock`). */
+class StopLoop extends Error {}
+
 export class ReorgError extends Error {
   constructor(public readonly chain: string, public readonly atBlock: number) {
     super(`reorg detected on ${chain} around block ${atBlock}`);
@@ -140,47 +143,65 @@ export class ChainRunner {
   async runLoop(options: { once?: boolean } = {}): Promise<void> {
     this.running = true;
     const { metrics, log } = this.deps.obs;
+    let failures = 0;
     try {
       while (this.running && !this.abort.signal.aborted) {
-        this.head = await this.plan.config.source.getHeight();
-        this.finalized = this.head - this.finality;
-        if (this.plan.endBlock !== undefined) this.finalized = Math.min(this.finalized, this.plan.endBlock);
-        await this.maybeRefreshRegistry();
-        await this.adoptPending();
-        metrics.setProgress(this.chain, this.cursor, this.head, this.finalized);
-        if (this.cursor > this.finalized) {
-          if (!this.caughtUp) {
-            this.caughtUp = true;
-            log.info("yail", `${this.chain}: caught up at block ${this.cursor - 1} (head ${this.head}, finality ${this.finality})`);
-          }
-          if (options.once || (this.plan.endBlock !== undefined && this.cursor > this.plan.endBlock)) return;
-          await this.sleep(this.pollInterval);
-          continue;
-        }
-        this.caughtUp = false;
-        let to = Math.min(this.finalized + 1, this.cursor + this.maxBlockRange);
-        const boundary = nextBoundary(this.plan, this.cursor);
-        if (boundary !== undefined) to = Math.min(to, boundary);
+        // A source outage must not take the chain down: back off and resume from the checkpoint, up to ~30 minutes.
         try {
-          await this.processRange(this.cursor, to, { backfill: false, signal: this.abort.signal, label: "live" });
+          await this.step(options);
+          failures = 0;
         } catch (err) {
-          if (err instanceof ReorgError) {
-            const from = Math.max(this.plan.startBlock, err.atBlock - this.finality * 2);
-            log.error({ event: "reorg", chain: this.chain, atBlock: err.atBlock, rewindTo: from });
-            metrics.recordError(this.chain, "reorg");
-            await this.deps.enqueueReindex(this.chain, from, this.cursor);
-            continue;
-          }
-          throw err;
+          if (this.abort.signal.aborted || err instanceof StopLoop || ++failures > 30) throw err;
+          const wait = Math.min(60_000, 1000 * 2 ** failures);
+          log.error({ event: "chain_retry", chain: this.chain, cursor: this.cursor, attempt: failures, waitMs: wait, error: { name: (err as Error).name, message: (err as Error).message } });
+          metrics.recordError(this.chain, "source");
+          await this.sleep(wait);
         }
       }
     } catch (err) {
+      if (err instanceof StopLoop) return;
       this.error = err as Error;
       metrics.recordError(this.chain, "chain");
       log.error({ event: "chain_failed", chain: this.chain, cursor: this.cursor, error: { name: (err as Error).name, message: (err as Error).message, stack: (err as Error).stack } });
       throw err;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** One turn of the loop: refresh the head, then index the next range or wait at the tip. */
+  private async step(options: { once?: boolean }): Promise<void> {
+    const { metrics, log } = this.deps.obs;
+    this.head = await this.plan.config.source.getHeight();
+    this.finalized = this.head - this.finality;
+    if (this.plan.endBlock !== undefined) this.finalized = Math.min(this.finalized, this.plan.endBlock);
+    await this.maybeRefreshRegistry();
+    await this.adoptPending();
+    metrics.setProgress(this.chain, this.cursor, this.head, this.finalized);
+    if (this.cursor > this.finalized) {
+      if (!this.caughtUp) {
+        this.caughtUp = true;
+        log.info("yail", `${this.chain}: caught up at block ${this.cursor - 1} (head ${this.head}, finality ${this.finality})`);
+      }
+      if (options.once || (this.plan.endBlock !== undefined && this.cursor > this.plan.endBlock)) throw new StopLoop();
+      await this.sleep(this.pollInterval);
+      return;
+    }
+    this.caughtUp = false;
+    let to = Math.min(this.finalized + 1, this.cursor + this.maxBlockRange);
+    const boundary = nextBoundary(this.plan, this.cursor);
+    if (boundary !== undefined) to = Math.min(to, boundary);
+    try {
+      await this.processRange(this.cursor, to, { backfill: false, signal: this.abort.signal, label: "live" });
+    } catch (err) {
+      if (err instanceof ReorgError) {
+        const from = Math.max(this.plan.startBlock, err.atBlock - this.finality * 2);
+        log.error({ event: "reorg", chain: this.chain, atBlock: err.atBlock, rewindTo: from });
+        metrics.recordError(this.chain, "reorg");
+        await this.deps.enqueueReindex(this.chain, from, this.cursor);
+        return;
+      }
+      throw err;
     }
   }
 
