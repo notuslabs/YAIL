@@ -28,6 +28,8 @@ export interface EvmLogFilter {
   address?: string[];
   /** Per-position topic alternatives (OR within a position, AND across positions). `null` = any. */
   topics?: Array<string[] | null>;
+  /** Part of the query's `join`: the transactions this filter matches come back whole. Other filters do not. */
+  join?: boolean;
 }
 
 export interface EvmTxFilter {

@@ -134,7 +134,7 @@ describe("plan", () => {
     const q = buildEvmQuery(plan, 0, 100, registry);
     const wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const padded = padAddress(wallet);
-    expect(q.logs).toEqual([{ topics: [null, [padded]] }, { topics: [null, null, [padded]] }, { topics: [null, null, null, [padded]] }]);
+    expect(q.logs).toEqual([{ topics: [null, [padded]], join: true }, { topics: [null, null, [padded]], join: true }, { topics: [null, null, null, [padded]], join: true }]);
     expect(q.traces).toEqual([{ from: [wallet] }, { to: [wallet] }]);
     expect(q.join).toBe(true);
   });

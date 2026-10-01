@@ -243,7 +243,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
       transactions.push({ to: addrs });
       if (!a.activity) continue;
       const padded = addrs.map(padAddress);
-      logs.push({ topics: [null, padded] }, { topics: [null, null, padded] }, { topics: [null, null, null, padded] });
+      logs.push({ topics: [null, padded], join: true }, { topics: [null, null, padded], join: true }, { topics: [null, null, null, padded], join: true });
       traces.push({ from: addrs }, { to: addrs });
     }
     if (a.activity) join = true;

@@ -76,7 +76,7 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 
 | source | use |
 |---|---|
-| `hypersync({ url, apiToken })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. |
+| `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
 | `cached(source, { db, chain })` | ClickHouse page cache in front of any source; `cache: { source: true }` in the config does this for every chain |
@@ -152,8 +152,10 @@ accounts: { Wallets: { chain: "base", address: addressSet("wallets"), activity: 
 ```
 
 Traces come only from trace-enabled HyperSync endpoints (e.g. `https://eth-traces.hypersync.xyz`,
-`https://base-traces.hypersync.xyz`, a paid add-on); elsewhere `event.traces` is empty. Needs HyperSync (`rpc()` refuses
-whole-transaction queries).
+`https://base-traces.hypersync.xyz`, a paid add-on), named in `hypersync({ traces })`; elsewhere `event.traces` is
+empty. Needs HyperSync (`rpc()` refuses whole-transaction queries). The whole-transaction query only carries the
+account's own filters: a contract's logs on the same chain are fetched apart and merged by block, so a DEX's every
+swap does not come back with its transaction and traces.
 
 ### Dynamic addresses and backfill
 
