@@ -132,7 +132,7 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
   context.db        // insert (buffered), find (buffer-aware), rows, query, command
   context.client    // viem readContract with a ClickHouse cache keyed by block (needs `rpc` on the chain)
   context.http      // fetch with optional ClickHouse cache: http.get(url, { cache: true })
-  context.effect    // run a cached effect: context.effect(tokenMetadata, { address })
+  context.lookup    // resolve a cached lookup: context.lookup(tokenMetadata, { address })
   context.addresses // has/register/list for address sets
   context.log       // evlog wide event of the current batch: log.set({ ... })
 });
@@ -162,25 +162,32 @@ empty. Needs HyperSync (`rpc()` refuses whole-transaction queries). The whole-tr
 account's own filters: a contract's logs on the same chain are fetched apart and merged by block, so a DEX's every
 swap does not come back with its transaction and traces.
 
-### Effects
+### Lookups
 
-A named async function of a JSON input, run once per `(chain, name, input)` and kept forever in `_yail_effects`
-(HyperIndex's `context.effect`): token metadata, a price, a provider lookup. The first call runs it, later ones read
-the cache (memory, then ClickHouse); concurrent calls share one run. The table is plain ClickHouse, so a schema view
-can read the outputs (`JSONExtractString(output, 'symbol')`) instead of the indexer keeping a table of the same facts.
+Something resolved outside the chain data, once per `(chain, name, input)`: a token's metadata over RPC, a price from
+an API, a request through a provider. The first call runs it, later ones read the cache, concurrent calls share one
+run. The cache is `lookups.cache` in the config: `memory()` (default, lives with the process) or `redis({ url })`
+(optional peer dependency `redis`), so re-indexes and restarts never ask again. What the indexer needs from the answer
+it writes to its own tables, like any other data.
 
 ```ts
-export const tokenMetadata = effect("tokenMetadata", async ({ address }: { address: string }, { client }) => {
+export const tokenMetadata = lookup("tokenMetadata", async ({ address }: { address: string }, { client }) => {
   const read = (functionName: "name" | "symbol" | "decimals") => client!.readContract({ address, abi: erc20Abi, functionName, noCache: true }).catch(() => null);
   const [name, symbol, decimals] = await Promise.all([read("name"), read("symbol"), read("decimals")]);
   return { name, symbol, decimals };
 });
 indexer.on("Factory:PoolCreated", async ({ event, context }) => {
-  const { decimals } = await context.effect(tokenMetadata, { address: event.args.token0.toLowerCase() });
+  const address = event.args.token0.toLowerCase();
+  context.db.insert(tokens).values({ chain: context.chain.name, address, ...(await context.lookup(tokenMetadata, { address })) });
 });
 ```
 
-In tests, `seedEffect(db, chain, fx, input, output)` from `@notuslabs/yail/testing` fixes an answer so the effect never runs.
+```ts
+// yail.config.ts
+lookups: { cache: redis({ url: process.env.REDIS_URL }) },
+```
+
+In tests, `seedLookup(cache, chain, fx, input, output)` from `@notuslabs/yail/testing` fixes an answer so the lookup never runs.
 
 ### Dynamic addresses and backfill
 
