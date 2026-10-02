@@ -36,7 +36,7 @@ export interface HandlerContext<C extends Config<any, any, any> = Config<any, an
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
   http: HttpClient;
-  /** The answer for `key` on this chain, computed once by `fn` and kept in the configured store (`cache.store`). */
+  /** The answer for `key` on this chain, computed once by `handler` and kept in the configured store (`cache.store`). */
   cache<O>(query: CacheQuery<O>): Promise<O>;
   addresses: AddressesApi;
   /** ABIs and static addresses from the config, for `client.readContract`. */

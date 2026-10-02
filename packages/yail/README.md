@@ -132,7 +132,7 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
   context.db        // insert (buffered), find (buffer-aware), rows, query, command
   context.client    // viem readContract with a ClickHouse cache keyed by block (needs `rpc` on the chain)
   context.http      // fetch with optional ClickHouse cache: http.get(url, { cache: true })
-  context.cache     // an answer computed once per chain and key: context.cache({ key: ["tokenMetadata", address], fn: async () => … })
+  context.cache     // an answer computed once per chain and key: context.cache({ key: ["tokenMetadata", address], handler: async () => … })
   context.addresses // has/register/list for address sets
   context.log       // evlog wide event of the current batch: log.set({ ... })
 });
@@ -164,7 +164,7 @@ swap does not come back with its transaction and traces.
 
 ### Cache
 
-`context.cache({ key, fn })` (after useQuery) computes an answer once per chain and key and keeps it in the store: a token's metadata over
+`context.cache({ key, handler })` (after useQuery) computes an answer once per chain and key and keeps it in the store: a token's metadata over
 RPC, a price from an API, a request through a provider. Later calls read the store, concurrent calls share one run.
 The store is `cache.store` in the config: `memory()` (default, lives with the process) or `redis({ url })` (optional
 peer dependency `redis`), so re-indexes and restarts never ask again. What the indexer needs from the answer it writes
@@ -175,7 +175,7 @@ indexer.on("Factory:PoolCreated", async ({ event, context }) => {
   const address = event.args.token0.toLowerCase();
   const metadata = await context.cache({
     key: ["tokenMetadata", address],
-    fn: async () => {
+    handler: async () => {
       const read = (functionName: "name" | "symbol" | "decimals") => context.client!.readContract({ address, abi: erc20Abi, functionName, noCache: true }).catch(() => null);
       const [name, symbol, decimals] = await Promise.all([read("name"), read("symbol"), read("decimals")]);
       return { name, symbol, decimals };

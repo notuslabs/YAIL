@@ -7,10 +7,10 @@ export interface CacheStore {
 /** A cache key: a string, or a tuple such as `["tokenMetadata", address]`. */
 export type CacheKey = string | readonly unknown[];
 
-/** What `context.cache` takes, after useQuery: the key the answer is kept under, and the function that computes it. */
+/** What `context.cache` takes, after useQuery: the key the answer is kept under, and the handler that computes it. */
 export interface CacheQuery<O> {
   key: CacheKey;
-  fn: () => Promise<O>;
+  handler: () => Promise<O>;
 }
 
 /** JSON with object keys sorted, so equal values make equal keys. */
@@ -21,7 +21,7 @@ export function canonical(value: unknown): string {
 export const cacheKey = (chain: string, key: CacheKey) => `${chain}:${typeof key === "string" ? key : canonical(key)}`;
 
 /**
- * `context.cache({ key, fn })` for one chain: the answer for `key` is computed once by `fn` and kept in the store, so
+ * `context.cache({ key, fn })` for one chain: the answer for `key` is computed once by `handler` and kept in the store, so
  * re-runs and re-indexes never compute it again; concurrent calls with the same key share one run.
  */
 export class CacheRunner {
@@ -29,14 +29,14 @@ export class CacheRunner {
 
   constructor(private readonly store: CacheStore, private readonly chain: string, private readonly onCache?: (hit: boolean) => void) {}
 
-  async run<O>({ key, fn }: CacheQuery<O>): Promise<O> {
+  async run<O>({ key, handler }: CacheQuery<O>): Promise<O> {
     const full = cacheKey(this.chain, key);
     const cached = await this.store.get(full);
     this.onCache?.(cached !== undefined);
     if (cached !== undefined) return JSON.parse(cached) as O;
     let pending = this.inflight.get(full) as Promise<O> | undefined;
     if (!pending) {
-      pending = fn().then(async (result) => {
+      pending = handler().then(async (result) => {
         await this.store.set(full, canonical(result));
         return result;
       });

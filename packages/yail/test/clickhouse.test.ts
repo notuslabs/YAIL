@@ -98,7 +98,7 @@ describe("clickhouse", () => {
   it("computes a cached answer once per chain and key", async () => {
     let runs = 0;
     const store = memory();
-    const metadata = (cache: CacheRunner, address: string) => cache.run({ key: ["tokenMetadata", address], fn: async () => ({ symbol: `T${++runs}`, address }) });
+    const metadata = (cache: CacheRunner, address: string) => cache.run({ key: ["tokenMetadata", address], handler: async () => ({ symbol: `T${++runs}`, address }) });
     const base = new CacheRunner(store, "base");
     const [a, b] = await Promise.all([metadata(base, "0xa"), metadata(base, "0xa")]);
     expect(a).toEqual({ symbol: "T1", address: "0xa" });
