@@ -5,7 +5,7 @@ import { migrate } from "../src/db/migrate.js";
 import { sql } from "../src/db/sql.js";
 import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
-import { CacheRunner, cache as cacheFn, seedCache } from "../src/cache/cached.js";
+import { CacheRunner, seedCache } from "../src/cache/cached.js";
 import { memory } from "../src/cache/stores.js";
 import { createHttpClient } from "../src/http/client.js";
 
@@ -95,20 +95,19 @@ describe("clickhouse", () => {
     expect(calls).toBe(2);
   });
 
-  it("runs a cached function once per chain and input, through the store", async () => {
+  it("computes a cached answer once per chain and key", async () => {
     let runs = 0;
-    const metadata = cacheFn("metadata", async ({ address }: { address: string }) => ({ symbol: `T${++runs}`, decimals: 18, address }));
-    const context = { chain: { name: "base", id: 8453, kind: "evm" as const }, client: undefined, http: createHttpClient({ db }) };
     const store = memory();
-    const cache = new CacheRunner(store, context);
-    const [a, b] = await Promise.all([cache.run(metadata, { address: "0xa" }), cache.run(metadata, { address: "0xa" })]);
-    expect(a).toEqual({ symbol: "T1", decimals: 18, address: "0xa" });
+    const metadata = (cache: CacheRunner, address: string) => cache.run(["tokenMetadata", address], async () => ({ symbol: `T${++runs}`, address }));
+    const base = new CacheRunner(store, "base");
+    const [a, b] = await Promise.all([metadata(base, "0xa"), metadata(base, "0xa")]);
+    expect(a).toEqual({ symbol: "T1", address: "0xa" });
     expect(b).toEqual(a); // concurrent calls share the run
-    expect(await new CacheRunner(store, context).run(metadata, { address: "0xa" })).toEqual(a); // the cache, not the run
-    expect(await cache.run(metadata, { address: "0xb" })).toEqual({ symbol: "T2", decimals: 18, address: "0xb" });
-    expect(await new CacheRunner(store, { ...context, chain: { ...context.chain, name: "polygon" } }).run(metadata, { address: "0xa" })).toEqual({ symbol: "T3", decimals: 18, address: "0xa" }); // per chain
-    await seedCache(store, "base", metadata, { address: "0xc" }, { symbol: "SEED", decimals: 6, address: "0xc" });
-    expect(await cache.run(metadata, { address: "0xc" })).toEqual({ symbol: "SEED", decimals: 6, address: "0xc" });
+    expect(await metadata(new CacheRunner(store, "base"), "0xa")).toEqual(a); // the store, not the run
+    expect(await metadata(base, "0xb")).toEqual({ symbol: "T2", address: "0xb" });
+    expect(await metadata(new CacheRunner(store, "polygon"), "0xa")).toEqual({ symbol: "T3", address: "0xa" }); // per chain
+    await seedCache(store, "base", ["tokenMetadata", "0xc"], { symbol: "SEED", address: "0xc" });
+    expect(await metadata(base, "0xc")).toEqual({ symbol: "SEED", address: "0xc" });
     expect(runs).toBe(3);
   });
 });

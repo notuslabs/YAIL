@@ -5,7 +5,7 @@ import { BatchWriter } from "../db/batch.js";
 import type { RowMeta } from "../db/serialize.js";
 import type { HttpClient } from "../http/client.js";
 import type { CachedClient } from "../rpc/cached-client.js";
-import { CacheRunner, type Cached } from "../cache/cached.js";
+import { CacheRunner, type CacheKey } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
@@ -36,8 +36,8 @@ export interface HandlerContext<C extends Config<any, any, any> = Config<any, an
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
   http: HttpClient;
-  /** Run a cached function: its answer for this chain and input is computed once and kept in the configured store. */
-  cache<I, O>(fx: Cached<I, O>, input: I): Promise<O>;
+  /** The answer for `key` on this chain, computed once by `run` and kept in the configured store (`cache.store`). */
+  cache<O>(key: CacheKey, run: () => Promise<O>): Promise<O>;
   addresses: AddressesApi;
   /** ABIs and static addresses from the config, for `client.readContract`. */
   contracts: { [K in keyof NonNullable<C["contracts"]> & string]: { abi: NonNullable<C["contracts"]>[K]["abi"]; address?: string } };
@@ -87,13 +87,13 @@ export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: Ro
 }
 
 export function createContext(deps: ContextDeps): HandlerContext<any, string> {
-  const cache = deps.cache ?? new CacheRunner(memory(), { chain: deps.chain, client: deps.client, http: deps.http });
+  const cache = deps.cache ?? new CacheRunner(memory(), deps.chain.name);
   return {
     chain: deps.chain,
     db: createHandlerDb(deps.db, deps.writer, deps.meta),
     client: deps.client,
     http: deps.http,
-    cache: (fx, input) => cache.run(fx, input),
+    cache: (key, run) => cache.run(key, run),
     addresses: {
       has: (set, address, chain) => deps.registry.has(set, chain ?? deps.chain.name, address),
       register: (set, address, options) =>

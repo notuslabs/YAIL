@@ -14,8 +14,7 @@ export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmB
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";
-export { cache } from "./cache/cached.js";
-export type { Cached, CacheContext, CacheStore } from "./cache/cached.js";
+export type { CacheStore, CacheKey } from "./cache/cached.js";
 export { memory, redis } from "./cache/stores.js";
 export type { Indexer, IndexerOptions, StatusSnapshot, ReindexRequest } from "./indexer/indexer.js";
 export type { HandlerContext, HandlerDb, AddressesApi } from "./indexer/context.js";

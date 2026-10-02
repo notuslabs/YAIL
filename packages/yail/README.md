@@ -132,7 +132,7 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
   context.db        // insert (buffered), find (buffer-aware), rows, query, command
   context.client    // viem readContract with a ClickHouse cache keyed by block (needs `rpc` on the chain)
   context.http      // fetch with optional ClickHouse cache: http.get(url, { cache: true })
-  context.cache     // run a cached function: context.cache(tokenMetadata, { address })
+  context.cache     // an answer computed once per chain and key: context.cache(["tokenMetadata", address], async () => …)
   context.addresses // has/register/list for address sets
   context.log       // evlog wide event of the current batch: log.set({ ... })
 });
@@ -162,23 +162,23 @@ empty. Needs HyperSync (`rpc()` refuses whole-transaction queries). The whole-tr
 account's own filters: a contract's logs on the same chain are fetched apart and merged by block, so a DEX's every
 swap does not come back with its transaction and traces.
 
-### Cached functions
+### Cache
 
-Something resolved outside the chain data, once per `(chain, name, input)`: a token's metadata over RPC, a price from
-an API, a request through a provider. The first call runs it, later ones read the store, concurrent calls share one
-run. The store is `cache.store` in the config: `memory()` (default, lives with the process) or `redis({ url })`
-(optional peer dependency `redis`), so re-indexes and restarts never ask again. What the indexer needs from the answer
-it writes to its own tables, like any other data.
+`context.cache(key, run)` computes an answer once per chain and key and keeps it in the store: a token's metadata over
+RPC, a price from an API, a request through a provider. Later calls read the store, concurrent calls share one run.
+The store is `cache.store` in the config: `memory()` (default, lives with the process) or `redis({ url })` (optional
+peer dependency `redis`), so re-indexes and restarts never ask again. What the indexer needs from the answer it writes
+to its own tables, like any other data.
 
 ```ts
-export const tokenMetadata = cache("tokenMetadata", async ({ address }: { address: string }, { client }) => {
-  const read = (functionName: "name" | "symbol" | "decimals") => client!.readContract({ address, abi: erc20Abi, functionName, noCache: true }).catch(() => null);
-  const [name, symbol, decimals] = await Promise.all([read("name"), read("symbol"), read("decimals")]);
-  return { name, symbol, decimals };
-});
 indexer.on("Factory:PoolCreated", async ({ event, context }) => {
   const address = event.args.token0.toLowerCase();
-  context.db.insert(tokens).values({ chain: context.chain.name, address, ...(await context.cache(tokenMetadata, { address })) });
+  const metadata = await context.cache(["tokenMetadata", address], async () => {
+    const read = (functionName: "name" | "symbol" | "decimals") => context.client!.readContract({ address, abi: erc20Abi, functionName, noCache: true }).catch(() => null);
+    const [name, symbol, decimals] = await Promise.all([read("name"), read("symbol"), read("decimals")]);
+    return { name, symbol, decimals };
+  });
+  context.db.insert(tokens).values({ chain: context.chain.name, address, ...metadata });
 });
 ```
 
@@ -187,7 +187,7 @@ indexer.on("Factory:PoolCreated", async ({ event, context }) => {
 cache: { store: redis({ url: process.env.REDIS_URL }) },
 ```
 
-In tests, `seedCache(store, chain, fx, input, output)` from `@notuslabs/yail/testing` fixes an answer so the function never runs.
+In tests, `seedCache(store, chain, key, output)` from `@notuslabs/yail/testing` fixes an answer so its function never runs.
 
 ### Dynamic addresses and backfill
 

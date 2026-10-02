@@ -345,7 +345,7 @@ export class ChainRunner {
 
   private makeContext(writer: BatchWriter, meta: { current: RowMeta }, log: WideLogger, backfill: boolean): HandlerContext<any, string> {
     const chain = { name: this.chain, id: this.plan.config.id, kind: this.plan.kind };
-    this.cache ??= new CacheRunner(this.deps.config.cache?.store ?? memory(), { chain, client: this.client, http: this.deps.http }, (hit) => this.deps.obs.metrics.recordCache("cached", hit));
+    this.cache ??= new CacheRunner(this.deps.config.cache?.store ?? memory(), this.chain, (hit) => this.deps.obs.metrics.recordCache("cached", hit));
     return createContext({
       db: this.deps.db,
       writer,
