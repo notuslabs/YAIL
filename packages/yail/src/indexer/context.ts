@@ -5,7 +5,7 @@ import { BatchWriter } from "../db/batch.js";
 import type { RowMeta } from "../db/serialize.js";
 import type { HttpClient } from "../http/client.js";
 import type { CachedClient } from "../rpc/cached-client.js";
-import { CacheRunner, type CacheKey } from "../cache/cached.js";
+import { CacheRunner, type CacheQuery } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
@@ -36,8 +36,8 @@ export interface HandlerContext<C extends Config<any, any, any> = Config<any, an
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
   http: HttpClient;
-  /** The answer for `key` on this chain, computed once by `run` and kept in the configured store (`cache.store`). */
-  cache<O>(key: CacheKey, run: () => Promise<O>): Promise<O>;
+  /** The answer for `key` on this chain, computed once by `fn` and kept in the configured store (`cache.store`). */
+  cache<O>(query: CacheQuery<O>): Promise<O>;
   addresses: AddressesApi;
   /** ABIs and static addresses from the config, for `client.readContract`. */
   contracts: { [K in keyof NonNullable<C["contracts"]> & string]: { abi: NonNullable<C["contracts"]>[K]["abi"]; address?: string } };
@@ -93,7 +93,7 @@ export function createContext(deps: ContextDeps): HandlerContext<any, string> {
     db: createHandlerDb(deps.db, deps.writer, deps.meta),
     client: deps.client,
     http: deps.http,
-    cache: (key, run) => cache.run(key, run),
+    cache: (query) => cache.run(query),
     addresses: {
       has: (set, address, chain) => deps.registry.has(set, chain ?? deps.chain.name, address),
       register: (set, address, options) =>

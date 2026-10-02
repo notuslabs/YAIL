@@ -7,6 +7,12 @@ export interface CacheStore {
 /** A cache key: a string, or a tuple such as `["tokenMetadata", address]`. */
 export type CacheKey = string | readonly unknown[];
 
+/** What `context.cache` takes, after useQuery: the key the answer is kept under, and the function that computes it. */
+export interface CacheQuery<O> {
+  key: CacheKey;
+  fn: () => Promise<O>;
+}
+
 /** JSON with object keys sorted, so equal values make equal keys. */
 export function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : typeof v === "bigint" ? v.toString() : v));
@@ -15,7 +21,7 @@ export function canonical(value: unknown): string {
 export const cacheKey = (chain: string, key: CacheKey) => `${chain}:${typeof key === "string" ? key : canonical(key)}`;
 
 /**
- * `context.cache(key, run)` for one chain: the answer for `key` is computed once by `run` and kept in the store, so
+ * `context.cache({ key, fn })` for one chain: the answer for `key` is computed once by `fn` and kept in the store, so
  * re-runs and re-indexes never compute it again; concurrent calls with the same key share one run.
  */
 export class CacheRunner {
@@ -23,14 +29,14 @@ export class CacheRunner {
 
   constructor(private readonly store: CacheStore, private readonly chain: string, private readonly onCache?: (hit: boolean) => void) {}
 
-  async run<O>(key: CacheKey, run: () => Promise<O>): Promise<O> {
+  async run<O>({ key, fn }: CacheQuery<O>): Promise<O> {
     const full = cacheKey(this.chain, key);
     const cached = await this.store.get(full);
     this.onCache?.(cached !== undefined);
     if (cached !== undefined) return JSON.parse(cached) as O;
     let pending = this.inflight.get(full) as Promise<O> | undefined;
     if (!pending) {
-      pending = run().then(async (result) => {
+      pending = fn().then(async (result) => {
         await this.store.set(full, canonical(result));
         return result;
       });
