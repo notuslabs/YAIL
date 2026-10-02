@@ -2,7 +2,7 @@ import type { Abi } from "viem";
 import type { DatabaseConfig } from "../db/client.js";
 import type { Source } from "../sources/types.js";
 import type { AddressSetRef, FactoryRef } from "./address.js";
-import type { LookupCache } from "../lookups/lookup.js";
+import type { CacheStore } from "../cache/cached.js";
 
 export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRef;
 
@@ -79,6 +79,8 @@ export interface AddressSetConfig {
 }
 
 export interface CacheConfig {
+  /** Where `context.cache` answers live: `memory()` (default, the process) or `redis({ url })`. */
+  store?: CacheStore;
   /** Cache raw source batches in ClickHouse (`_yail_source_cache`). Same effect as wrapping sources in `cached()`. */
   source?: boolean;
   /** Persist `context.http` responses in ClickHouse. Default true. */
@@ -117,11 +119,6 @@ export interface IndexingConfig {
   addressChunk?: number;
 }
 
-export interface LookupsConfig {
-  /** Where `context.lookup` answers live: `memory()` (default, the process) or `redis({ url })`. */
-  cache?: LookupCache;
-}
-
 export interface Config<
   chains extends Record<string, ChainConfig> = Record<string, ChainConfig>,
   contracts extends Record<string, ContractConfig<any>> = Record<string, ContractConfig<any>>,
@@ -136,5 +133,4 @@ export interface Config<
   observability?: ObservabilityConfig;
   server?: ServerConfig;
   indexing?: IndexingConfig;
-  lookups?: LookupsConfig;
 }

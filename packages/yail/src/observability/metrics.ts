@@ -20,18 +20,18 @@ export interface ChainStats {
 }
 
 type CounterName = keyof Metrics["counters"];
-const CACHE_COUNTERS: Record<"source" | "http" | "rpc" | "lookup", [CounterName, CounterName]> = {
+const CACHE_COUNTERS: Record<"source" | "http" | "rpc" | "cached", [CounterName, CounterName]> = {
   source: ["cacheHits", "cacheMisses"],
   http: ["httpCacheHits", "httpCacheMisses"],
   rpc: ["rpcCacheHits", "rpcCacheMisses"],
-  lookup: ["lookupCacheHits", "lookupCacheMisses"],
+  cached: ["cachedCacheHits", "cachedCacheMisses"],
 };
 
 export class Metrics {
   readonly meter: Meter;
   readonly tracer: Tracer;
   readonly chains = new Map<string, ChainStats>();
-  readonly counters = { sourceRequests: 0, cacheHits: 0, cacheMisses: 0, httpCacheHits: 0, httpCacheMisses: 0, rpcCacheHits: 0, rpcCacheMisses: 0, lookupCacheHits: 0, lookupCacheMisses: 0, rowsFlushed: 0, jobsDone: 0, jobsFailed: 0 };
+  readonly counters = { sourceRequests: 0, cacheHits: 0, cacheMisses: 0, httpCacheHits: 0, httpCacheMisses: 0, rpcCacheHits: 0, rpcCacheMisses: 0, cachedCacheHits: 0, cachedCacheMisses: 0, rowsFlushed: 0, jobsDone: 0, jobsFailed: 0 };
 
   private blocksIndexed;
   private eventsProcessed;
@@ -119,7 +119,7 @@ export class Metrics {
     this.errors.add(1, { chain: chain ?? "", stage });
   }
 
-  recordCache(cache: "source" | "http" | "rpc" | "lookup", hit: boolean): void {
+  recordCache(cache: "source" | "http" | "rpc" | "cached", hit: boolean): void {
     const [hitCounter, missCounter] = CACHE_COUNTERS[cache];
     let result = "miss";
     let counter = missCounter;

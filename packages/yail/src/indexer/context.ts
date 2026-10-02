@@ -5,8 +5,8 @@ import { BatchWriter } from "../db/batch.js";
 import type { RowMeta } from "../db/serialize.js";
 import type { HttpClient } from "../http/client.js";
 import type { CachedClient } from "../rpc/cached-client.js";
-import { Lookups, type Lookup } from "../lookups/lookup.js";
-import { memory } from "../lookups/caches.js";
+import { CacheRunner, type Cached } from "../cache/cached.js";
+import { memory } from "../cache/stores.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
 import type { Config } from "../config/types.js";
@@ -16,7 +16,7 @@ import { toArray } from "../util.js";
 export interface HandlerDb extends Omit<Db, "insert"> {
   /** Buffered insert. Rows become visible in ClickHouse after the batch flushes (before the checkpoint is written). */
   insert<T extends Table<any>>(table: T): { values(rows: InsertRow<T> | InsertRow<T>[]): void };
-  /** Buffer-aware lookup: returns the latest row written in this batch for the key, else reads ClickHouse (FINAL). */
+  /** Buffer-aware cached: returns the latest row written in this batch for the key, else reads ClickHouse (FINAL). */
   find<T extends Table<any>>(table: T, key: Partial<InferRow<T>>): Promise<InferRow<T> | null>;
   /** Force a flush now (rarely needed). */
   flush(): Promise<void>;
@@ -36,8 +36,8 @@ export interface HandlerContext<C extends Config<any, any, any> = Config<any, an
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
   http: HttpClient;
-  /** Resolve a lookup: its answer for this chain and input is computed once and kept in the configured cache. */
-  lookup<I, O>(fx: Lookup<I, O>, input: I): Promise<O>;
+  /** Run a cached function: its answer for this chain and input is computed once and kept in the configured store. */
+  cache<I, O>(fx: Cached<I, O>, input: I): Promise<O>;
   addresses: AddressesApi;
   /** ABIs and static addresses from the config, for `client.readContract`. */
   contracts: { [K in keyof NonNullable<C["contracts"]> & string]: { abi: NonNullable<C["contracts"]>[K]["abi"]; address?: string } };
@@ -61,7 +61,7 @@ export interface ContextDeps {
   /** Set by the runtime before each handler call. */
   meta: { current: RowMeta };
   /** Shared per chain (one cache, one in-flight map); a process-local one otherwise. */
-  lookups?: Lookups;
+  cache?: CacheRunner;
 }
 
 export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: RowMeta }): HandlerDb {
@@ -87,13 +87,13 @@ export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: Ro
 }
 
 export function createContext(deps: ContextDeps): HandlerContext<any, string> {
-  const lookups = deps.lookups ?? new Lookups(memory(), { chain: deps.chain, client: deps.client, http: deps.http });
+  const cache = deps.cache ?? new CacheRunner(memory(), { chain: deps.chain, client: deps.client, http: deps.http });
   return {
     chain: deps.chain,
     db: createHandlerDb(deps.db, deps.writer, deps.meta),
     client: deps.client,
     http: deps.http,
-    lookup: (fx, input) => lookups.run(fx, input),
+    cache: (fx, input) => cache.run(fx, input),
     addresses: {
       has: (set, address, chain) => deps.registry.has(set, chain ?? deps.chain.name, address),
       register: (set, address, options) =>

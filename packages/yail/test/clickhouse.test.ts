@@ -5,8 +5,8 @@ import { migrate } from "../src/db/migrate.js";
 import { sql } from "../src/db/sql.js";
 import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
-import { Lookups, lookup, seedLookup } from "../src/lookups/lookup.js";
-import { memory } from "../src/lookups/caches.js";
+import { CacheRunner, cache as cacheFn, seedCache } from "../src/cache/cached.js";
+import { memory } from "../src/cache/stores.js";
 import { createHttpClient } from "../src/http/client.js";
 
 const events = table(
@@ -95,20 +95,20 @@ describe("clickhouse", () => {
     expect(calls).toBe(2);
   });
 
-  it("resolves a lookup once per chain and input, through the cache", async () => {
+  it("runs a cached function once per chain and input, through the store", async () => {
     let runs = 0;
-    const metadata = lookup("metadata", async ({ address }: { address: string }) => ({ symbol: `T${++runs}`, decimals: 18, address }));
+    const metadata = cacheFn("metadata", async ({ address }: { address: string }) => ({ symbol: `T${++runs}`, decimals: 18, address }));
     const context = { chain: { name: "base", id: 8453, kind: "evm" as const }, client: undefined, http: createHttpClient({ db }) };
-    const cache = memory();
-    const lookups = new Lookups(cache, context);
-    const [a, b] = await Promise.all([lookups.run(metadata, { address: "0xa" }), lookups.run(metadata, { address: "0xa" })]);
+    const store = memory();
+    const cache = new CacheRunner(store, context);
+    const [a, b] = await Promise.all([cache.run(metadata, { address: "0xa" }), cache.run(metadata, { address: "0xa" })]);
     expect(a).toEqual({ symbol: "T1", decimals: 18, address: "0xa" });
     expect(b).toEqual(a); // concurrent calls share the run
-    expect(await new Lookups(cache, context).run(metadata, { address: "0xa" })).toEqual(a); // the cache, not the run
-    expect(await lookups.run(metadata, { address: "0xb" })).toEqual({ symbol: "T2", decimals: 18, address: "0xb" });
-    expect(await new Lookups(cache, { ...context, chain: { ...context.chain, name: "polygon" } }).run(metadata, { address: "0xa" })).toEqual({ symbol: "T3", decimals: 18, address: "0xa" }); // per chain
-    await seedLookup(cache, "base", metadata, { address: "0xc" }, { symbol: "SEED", decimals: 6, address: "0xc" });
-    expect(await lookups.run(metadata, { address: "0xc" })).toEqual({ symbol: "SEED", decimals: 6, address: "0xc" });
+    expect(await new CacheRunner(store, context).run(metadata, { address: "0xa" })).toEqual(a); // the cache, not the run
+    expect(await cache.run(metadata, { address: "0xb" })).toEqual({ symbol: "T2", decimals: 18, address: "0xb" });
+    expect(await new CacheRunner(store, { ...context, chain: { ...context.chain, name: "polygon" } }).run(metadata, { address: "0xa" })).toEqual({ symbol: "T3", decimals: 18, address: "0xa" }); // per chain
+    await seedCache(store, "base", metadata, { address: "0xc" }, { symbol: "SEED", decimals: 6, address: "0xc" });
+    expect(await cache.run(metadata, { address: "0xc" })).toEqual({ symbol: "SEED", decimals: 6, address: "0xc" });
     expect(runs).toBe(3);
   });
 });
