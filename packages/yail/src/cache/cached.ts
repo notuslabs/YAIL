@@ -21,7 +21,7 @@ export function canonical(value: unknown): string {
 export const cacheKey = (chain: string, key: CacheKey) => `${chain}:${typeof key === "string" ? key : canonical(key)}`;
 
 /**
- * `context.cache({ key, fn })` for one chain: the answer for `key` is computed once by `handler` and kept in the store, so
+ * `context.cache({ key, handler })` for one chain: the answer for `key` is computed once by `handler` and kept in the store, so
  * re-runs and re-indexes never compute it again; concurrent calls with the same key share one run.
  */
 export class CacheRunner {
