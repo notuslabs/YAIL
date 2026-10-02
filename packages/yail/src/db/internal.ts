@@ -107,4 +107,11 @@ export const blockHashes = table(
   { orderBy: ["chain", "block"], engineArgs: ["created_at"], indexMeta: false, ttl: "created_at + INTERVAL 7 DAY" },
 );
 
-export const INTERNAL_TABLES = [checkpoints, addresses, jobs, sourceCache, httpCache, rpcCache, blockHashes];
+/** Effect outputs (`context.effect`), one per chain, effect and canonical JSON input; readable by schema views. */
+export const effects = table(
+  "_yail_effects",
+  { chain: t.string().lowCardinality(), effect: t.string().lowCardinality(), input: t.string(), output: t.string(), createdAt: t.dateTime64(3) },
+  { orderBy: ["chain", "effect", "input"], engineArgs: ["created_at"], indexMeta: false },
+);
+
+export const INTERNAL_TABLES = [checkpoints, addresses, jobs, sourceCache, httpCache, rpcCache, blockHashes, effects];

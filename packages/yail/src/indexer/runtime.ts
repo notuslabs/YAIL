@@ -13,6 +13,7 @@ import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type HandlerContext } from "./context.js";
+import { EffectCache } from "../effects/effect.js";
 import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent } from "./events.js";
 import { buildBitcoinQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
 import type { BitcoinQuery, EvmQuery } from "../sources/types.js";
@@ -339,14 +340,19 @@ export class ChainRunner {
     this.deps.obs.metrics.setProgress(this.chain, this.cursor, this.head, this.finalized);
   }
 
+  private effects?: EffectCache;
+
   private makeContext(writer: BatchWriter, meta: { current: RowMeta }, log: WideLogger, backfill: boolean): HandlerContext<any, string> {
+    const chain = { name: this.chain, id: this.plan.config.id, kind: this.plan.kind };
+    this.effects ??= new EffectCache(this.deps.db, { chain, client: this.client, http: this.deps.http }, (hit) => this.deps.obs.metrics.recordCache("effect", hit));
     return createContext({
       db: this.deps.db,
       writer,
       registry: this.deps.registry,
       http: this.deps.http,
       client: this.client,
-      chain: { name: this.chain, id: this.plan.config.id, kind: this.plan.kind },
+      effects: this.effects,
+      chain,
       contracts: this.deps.contracts,
       defaultFromBlock: (set) => this.plan.sets.get(set) ?? this.plan.startBlock,
       log,

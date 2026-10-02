@@ -4,6 +4,7 @@ import type { DatabaseConfig } from "../db/client.js";
 export { fixtureSource, readFixture, writeFixture, recordEvmFixture, recordBitcoinFixture } from "../sources/fixture.js";
 export type { Fixture, EvmFixture, BitcoinFixture } from "../sources/fixture.js";
 export { readMemoryLogs } from "evlog/memory";
+export { seedEffect } from "../effects/effect.js";
 
 export interface TestClickHouse {
   /** Base HTTP URL with credentials, e.g. http://default:pass@localhost:32768 */

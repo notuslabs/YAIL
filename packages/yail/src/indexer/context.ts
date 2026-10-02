@@ -5,6 +5,7 @@ import { BatchWriter } from "../db/batch.js";
 import type { RowMeta } from "../db/serialize.js";
 import type { HttpClient } from "../http/client.js";
 import type { CachedClient } from "../rpc/cached-client.js";
+import { EffectCache, type Effect } from "../effects/effect.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
 import type { Config } from "../config/types.js";
@@ -34,6 +35,8 @@ export interface HandlerContext<C extends Config<any, any, any> = Config<any, an
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
   http: HttpClient;
+  /** Run a cached effect: its output for this chain and input is computed once and kept in `_yail_effects`. */
+  effect<I, O>(fx: Effect<I, O>, input: I): Promise<O>;
   addresses: AddressesApi;
   /** ABIs and static addresses from the config, for `client.readContract`. */
   contracts: { [K in keyof NonNullable<C["contracts"]> & string]: { abi: NonNullable<C["contracts"]>[K]["abi"]; address?: string } };
@@ -56,6 +59,8 @@ export interface ContextDeps {
   backfill: boolean;
   /** Set by the runtime before each handler call. */
   meta: { current: RowMeta };
+  /** Shared per chain so the in-memory layer outlives a batch; created on demand otherwise. */
+  effects?: EffectCache;
 }
 
 export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: RowMeta }): HandlerDb {
@@ -81,11 +86,13 @@ export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: Ro
 }
 
 export function createContext(deps: ContextDeps): HandlerContext<any, string> {
+  const effects = deps.effects ?? new EffectCache(deps.db, { chain: deps.chain, client: deps.client, http: deps.http });
   return {
     chain: deps.chain,
     db: createHandlerDb(deps.db, deps.writer, deps.meta),
     client: deps.client,
     http: deps.http,
+    effect: (fx, input) => effects.run(fx, input),
     addresses: {
       has: (set, address, chain) => deps.registry.has(set, chain ?? deps.chain.name, address),
       register: (set, address, options) =>

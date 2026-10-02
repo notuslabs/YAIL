@@ -5,6 +5,8 @@ import { migrate } from "../src/db/migrate.js";
 import { sql } from "../src/db/sql.js";
 import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
+import { EffectCache, effect, seedEffect } from "../src/effects/effect.js";
+import * as internalTables from "../src/db/internal.js";
 import { createHttpClient } from "../src/http/client.js";
 
 const events = table(
@@ -91,5 +93,23 @@ describe("clickhouse", () => {
     const d = await http2.get("https://example.com/price?ts=2");
     expect(d.cached).toBe(false);
     expect(calls).toBe(2);
+  });
+
+  it("runs an effect once per chain and input, and keeps its output in ClickHouse", async () => {
+    let runs = 0;
+    const metadata = effect("metadata", async ({ address }: { address: string }) => ({ symbol: `T${++runs}`, decimals: 18, address }));
+    const context = { chain: { name: "base", id: 8453, kind: "evm" as const }, client: undefined, http: createHttpClient({ db }) };
+    const cache = new EffectCache(db, context);
+    const [a, b] = await Promise.all([cache.run(metadata, { address: "0xa" }), cache.run(metadata, { address: "0xa" })]);
+    expect(a).toEqual({ symbol: "T1", decimals: 18, address: "0xa" });
+    expect(b).toEqual(a); // concurrent calls share the run
+    expect(await new EffectCache(db, context).run(metadata, { address: "0xa" })).toEqual(a); // a fresh cache reads ClickHouse
+    expect(await cache.run(metadata, { address: "0xb" })).toEqual({ symbol: "T2", decimals: 18, address: "0xb" });
+    expect(await new EffectCache(db, { ...context, chain: { ...context.chain, name: "polygon" } }).run(metadata, { address: "0xa" })).toEqual({ symbol: "T3", decimals: 18, address: "0xa" }); // per chain
+    await seedEffect(db, "base", metadata, { address: "0xc" }, { symbol: "SEED", decimals: 6, address: "0xc" });
+    expect(await cache.run(metadata, { address: "0xc" })).toEqual({ symbol: "SEED", decimals: 6, address: "0xc" });
+    expect(runs).toBe(3);
+    const rows = await db.query<{ effect: string; input: string }>(sql`SELECT effect, input FROM ${internalTables.effects} FINAL WHERE chain = 'base' ORDER BY input`);
+    expect(rows).toEqual([{ effect: "metadata", input: '{"address":"0xa"}' }, { effect: "metadata", input: '{"address":"0xb"}' }, { effect: "metadata", input: '{"address":"0xc"}' }]);
   });
 });

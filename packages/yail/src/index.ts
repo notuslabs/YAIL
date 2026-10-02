@@ -14,6 +14,8 @@ export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmB
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";
+export { effect } from "./effects/effect.js";
+export type { Effect, EffectContext } from "./effects/effect.js";
 export type { Indexer, IndexerOptions, StatusSnapshot, ReindexRequest } from "./indexer/indexer.js";
 export type { HandlerContext, HandlerDb, AddressesApi } from "./indexer/context.js";
 export type { ContractEvent, EvmAccountEvent, BitcoinAccountEvent, SetupEvent, EventNames, EventOf } from "./indexer/events.js";
