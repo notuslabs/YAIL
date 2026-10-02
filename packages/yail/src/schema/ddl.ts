@@ -43,9 +43,13 @@ export function tableDdl(table: Table<any>, database?: string): string {
   return parts.join("\n");
 }
 
+/** A refreshable view is dropped and recreated by `migrate` so a changed query or schedule applies; its target table keeps its data. */
 export function materializedViewDdl(view: MaterializedView, database?: string): string {
   const { text } = renderSql(view.query, { inline: true, database });
-  return `CREATE MATERIALIZED VIEW IF NOT EXISTS ${qualify(view.name, database)} TO ${qualify(view.to.name, database)} AS\n${text}`;
+  const refresh = view.refresh;
+  if (!refresh) return `CREATE MATERIALIZED VIEW IF NOT EXISTS ${qualify(view.name, database)} TO ${qualify(view.to.name, database)} AS\n${text}`;
+  const mode = refresh.append ? " APPEND" : "";
+  return `CREATE MATERIALIZED VIEW IF NOT EXISTS ${qualify(view.name, database)} REFRESH ${refresh.schedule}${mode} TO ${qualify(view.to.name, database)} AS\n${text}`;
 }
 
 /** `CREATE OR REPLACE`: a plain view holds no data, so every migrate applies its current query. */
@@ -56,7 +60,7 @@ export function viewDdl(view: View, database?: string): string {
 
 /** One-off backfill of a materialized view's target from existing source data. */
 export function materializedViewPopulateSql(view: MaterializedView, database?: string): string {
-  const { text } = renderSql(view.query, { inline: true, database });
+  const { text } = renderSql(view.refresh?.populate ?? view.query, { inline: true, database });
   return `INSERT INTO ${qualify(view.to.name, database)}\n${text}`;
 }
 

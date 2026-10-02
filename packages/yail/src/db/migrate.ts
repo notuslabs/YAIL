@@ -95,6 +95,7 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Schem
   }
   for (const v of views) {
     log(`create materialized view ${v.name}`);
+    if (v.refresh) await db.command(`DROP VIEW IF EXISTS \`${db.database}\`.\`${v.name}\``);
     await db.command(materializedViewDdl(v, db.database));
   }
   for (const v of plainViews) {

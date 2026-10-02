@@ -115,6 +115,10 @@ export const dailyMv = materializedView("wallet_daily_mv", {
 - Default engine is `ReplacingMergeTree(_yail_version)`: re-inserting a row with the same key (re-run, backfill overlap, crash replay) never double counts. Read with `FINAL` (`db.rows()` does) or let merges settle.
 - Materialized views are first class: created by `yail migrate`, backfilled over existing data with `yail migrate --populate`.
   They sum rows as they are inserted, before dedup, so a re-insert (replay, re-index) counts twice.
+- Refreshable materialized views (`materializedView(name, { to, from, query, refresh: { schedule: "EVERY 1 HOUR", append: true, populate } })`)
+  re-run their SELECT on a schedule into a real table, so they can join across rows and tables, which an insert-time
+  view cannot. With `append` the query covers a recent window and the target's ReplacingMergeTree key dedups it;
+  `populate` is the unwindowed query `yail migrate --populate` runs once for the history. ClickHouse >= 24.
 - Plain views (``view("balances", sql`SELECT … FROM ${ledger} FINAL …`)``) hold no data: they run on every read, so they
   always agree with their tables. `yail migrate` creates or replaces them, each after the views it reads.
 

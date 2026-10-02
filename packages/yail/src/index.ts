@@ -4,7 +4,7 @@ export type { Config, ChainConfig, ContractConfig, AccountConfig, EventFilter, A
 
 // Schema + database
 export { t, table, materializedView, view, tableDdl, materializedViewDdl, viewDdl } from "./schema/index.js";
-export type { Table, TableOptions, TableEngine, Column, InsertRow, InferRow, MaterializedView, View } from "./schema/index.js";
+export type { Table, TableOptions, TableEngine, Column, InsertRow, InferRow, MaterializedView, Refresh, View } from "./schema/index.js";
 export { createDb, sql, migrate, schemaDdl, BatchWriter, internalTables } from "./db/index.js";
 export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index.js";
 
