@@ -3,8 +3,10 @@ import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.j
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
 import { sql } from "../src/db/sql.js";
-import { t, table, materializedView } from "../src/schema/index.js";
+import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
+import { CacheRunner, seedCache } from "../src/cache/cached.js";
+import { memory } from "../src/cache/stores.js";
 import { createHttpClient } from "../src/http/client.js";
 
 const events = table(
@@ -14,6 +16,8 @@ const events = table(
 );
 const totals = table("totals", { wallet: t.address(), amount: t.int256() }, { orderBy: ["wallet"], engine: "SummingMergeTree", indexMeta: false });
 const totalsMv = materializedView("totals_mv", { from: events, to: totals, query: sql`SELECT wallet, sum(amount) AS amount FROM ${events} GROUP BY wallet` });
+const balances = view("balances", sql`SELECT wallet, sum(amount) AS amount FROM ${events} FINAL GROUP BY wallet`);
+const positive = view("positive", sql`SELECT * FROM ${balances} WHERE amount > ${0n}`);
 
 let ch: TestClickHouse;
 let db: Db;
@@ -21,7 +25,7 @@ let db: Db;
 beforeAll(async () => {
   ch = await startTestClickHouse();
   db = createDb(ch.database());
-  await migrate(db, { events, totals, totalsMv });
+  await migrate(db, { positive, events, totals, totalsMv, balances }); // a view listed before the view it reads
 });
 afterAll(async () => {
   await db?.close();
@@ -50,6 +54,13 @@ describe("clickhouse", () => {
     const rows = await db.query<{ wallet: string; amount: string }>(sql`SELECT wallet, sum(amount) AS amount FROM ${totals} GROUP BY wallet`);
     // MV saw both inserts of row 1 (10 and 11) plus -3: 18. This is why aggregates should be keyed by immutable rows.
     expect(rows).toEqual([{ wallet: "0xaaa", amount: "18" }]);
+  });
+
+  it("serves plain views computed at read time, after dedup", async () => {
+    // Same rows as the materialized view above, but read through FINAL: 11 - 3, not 18.
+    expect(await db.query(sql`SELECT wallet, amount FROM ${balances}`)).toEqual([{ wallet: "0xaaa", amount: "8" }]);
+    expect(await db.query(sql`SELECT wallet FROM ${positive}`)).toEqual([{ wallet: "0xaaa" }]);
+    await migrate(db, { positive, events, totals, totalsMv, balances }); // re-running migrate replaces the views in place
   });
 
   it("batch writer flushes per table and answers peek()", async () => {
@@ -82,5 +93,21 @@ describe("clickhouse", () => {
     const d = await http2.get("https://example.com/price?ts=2");
     expect(d.cached).toBe(false);
     expect(calls).toBe(2);
+  });
+
+  it("computes a cached answer once per chain and key", async () => {
+    let runs = 0;
+    const store = memory();
+    const metadata = (cache: CacheRunner, address: string) => cache.run({ key: ["tokenMetadata", address], handler: async () => ({ symbol: `T${++runs}`, address }) });
+    const base = new CacheRunner(store, "base");
+    const [a, b] = await Promise.all([metadata(base, "0xa"), metadata(base, "0xa")]);
+    expect(a).toEqual({ symbol: "T1", address: "0xa" });
+    expect(b).toEqual(a); // concurrent calls share the run
+    expect(await metadata(new CacheRunner(store, "base"), "0xa")).toEqual(a); // the store, not the run
+    expect(await metadata(base, "0xb")).toEqual({ symbol: "T2", address: "0xb" });
+    expect(await metadata(new CacheRunner(store, "polygon"), "0xa")).toEqual({ symbol: "T3", address: "0xa" }); // per chain
+    await seedCache(store, "base", ["tokenMetadata", "0xc"], { symbol: "SEED", address: "0xc" });
+    expect(await metadata(base, "0xc")).toEqual({ symbol: "SEED", address: "0xc" });
+    expect(runs).toBe(3);
   });
 });

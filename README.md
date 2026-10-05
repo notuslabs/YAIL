@@ -15,3 +15,5 @@ pnpm -r test            # needs Docker (ClickHouse testcontainer) or YAIL_TEST_C
 ```
 
 Tests replay recorded real chain data (`packages/yail/test/fixtures`) and assert against on-chain ground truth captured at record time. Refresh fixtures with `pnpm tsx packages/yail/scripts/record-fixtures.ts` (public RPCs, no keys needed).
+
+Releasing: bump `version` in `packages/yail/package.json` and merge to `main`. CI publishes to npm (trusted publishing, with provenance) and creates the `v<version>` GitHub release when that version is not on the registry yet.

@@ -1,6 +1,6 @@
 import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type ContractEventName, type DecodeEventLogReturnType } from "viem";
 import type { Config, EventFilter } from "../config/types.js";
-import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTransaction } from "../sources/types.js";
+import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction } from "../sources/types.js";
 import { isAddressSet } from "../config/address.js";
 import { toArray } from "../util.js";
 
@@ -35,9 +35,14 @@ export interface ContractEvent<abi extends Abi = Abi, name extends string = stri
 export interface EvmAccountEvent {
   /** The matched account address (lowercase). */
   address: string;
-  direction: "from" | "to" | "self";
+  /** How the transaction involves the account: it sent it, received it, both, or (with `activity`) only appears in its logs or traces. */
+  direction: "from" | "to" | "self" | "activity";
   transaction: EvmTransaction;
   block: EvmBlock;
+  /** Every log of the transaction, in order. Empty unless the account sets `activity: true`. */
+  logs: EvmLog[];
+  /** Every trace of the transaction, when the source serves traces. Empty unless the account sets `activity: true`. */
+  traces: EvmTrace[];
 }
 
 export interface BitcoinAccountEvent {
@@ -160,6 +165,19 @@ export function logMatchesFilter(log: EvmLog, filter: CompiledFilter, inSet: (se
     } else if (t.values && !t.values.includes(topic)) return false;
   }
   return true;
+}
+
+/** Addresses a transaction involves: its sender, its recipient, and every address in the given logs' topics and traces. */
+export function involvedAddresses(tx: EvmTransaction, logs: EvmLog[], traces: EvmTrace[]): string[] {
+  const mentioned = [...logs.flatMap((l) => l.topics.slice(1).map(unpadAddress)), ...traces.flatMap((t) => [t.from, t.to])];
+  return [...new Set([tx.from, tx.to, ...mentioned].filter((a): a is string => a !== null))];
+}
+
+export function directionOf(tx: EvmTransaction, address: string): EvmAccountEvent["direction"] {
+  if (tx.from === address && tx.to === address) return "self";
+  if (tx.from === address) return "from";
+  if (tx.to === address) return "to";
+  return "activity";
 }
 
 export function bitcoinAccountEvent(tx: BitcoinTransaction, address: string): BitcoinAccountEvent | null {

@@ -2,7 +2,7 @@ import type { Abi, AbiEvent } from "viem";
 import type { AccountConfig, AddressSpec, ChainConfig, Config, ContractConfig } from "../config/types.js";
 import { factorySetName, isAddressSet, isFactory, type FactoryRef } from "../config/address.js";
 import type { AddressRegistry } from "../addresses/registry.js";
-import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTxFilter } from "../sources/types.js";
+import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter } from "../sources/types.js";
 import { abiEvents, compileFilter, eventTopic, padAddress, type CompiledEvent, type CompiledFilter } from "./events.js";
 import { perChain } from "../config/chain-ref.js";
 import { toArray } from "../util.js";
@@ -29,6 +29,7 @@ export interface AccountSource {
   address: AddressSpec;
   startBlock: number;
   endBlock?: number;
+  activity: boolean;
 }
 
 export interface ChainPlan {
@@ -94,7 +95,7 @@ export function buildPlans(config: Config<any, any, any>, options: PlanOptions):
       const startBlock = resolveBlock(chain, override.startBlock ?? a.startBlock, 0);
       const endBlock = override.endBlock ?? a.endBlock;
       if (isAddressSet(address)) noteSet(plan, address.set, startBlock);
-      plan.accounts.push({ kind: "account", name, chain, address, startBlock, endBlock });
+      plan.accounts.push({ kind: "account", name, chain, address, startBlock, endBlock, activity: a.activity ?? false });
       plan.startBlock = Math.min(plan.startBlock, startBlock);
       plan.endBlock = mergeEnd(plan, endBlock);
     }
@@ -169,7 +170,9 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   const chunk = options.addressChunk ?? 500;
   const logs: EvmLogFilter[] = [];
   const transactions: EvmTxFilter[] = [];
+  const traces: EvmTraceFilter[] = [];
   let includeLogTransactions = false;
+  let join = false;
   const override = options.override;
 
   for (const c of plan.contracts) {
@@ -238,10 +241,15 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
     for (const addrs of chunkList(resolved.addresses, chunk)) {
       transactions.push({ from: addrs });
       transactions.push({ to: addrs });
+      if (!a.activity) continue;
+      const padded = addrs.map(padAddress);
+      logs.push({ topics: [null, padded], join: true }, { topics: [null, null, padded], join: true }, { topics: [null, null, null, padded], join: true });
+      traces.push({ from: addrs }, { to: addrs });
     }
+    if (a.activity) join = true;
   }
 
-  return { fromBlock: from, toBlock: to, logs, transactions, includeLogTransactions };
+  return { fromBlock: from, toBlock: to, logs, transactions, traces, includeLogTransactions, join };
 }
 
 export function buildBitcoinQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery {

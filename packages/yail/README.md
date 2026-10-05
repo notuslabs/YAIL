@@ -76,7 +76,7 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 
 | source | use |
 |---|---|
-| `hypersync({ url, apiToken })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. |
+| `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
 | `cached(source, { db, chain })` | ClickHouse page cache in front of any source; `cache: { source: true }` in the config does this for every chain |
@@ -114,6 +114,13 @@ export const dailyMv = materializedView("wallet_daily_mv", {
 - Every table gets three hidden columns (`_yail_chain`, `_yail_block`, `_yail_version`). They make re-indexing and versioned dedup work. Opt out with `indexMeta: false` for aggregate targets.
 - Default engine is `ReplacingMergeTree(_yail_version)`: re-inserting a row with the same key (re-run, backfill overlap, crash replay) never double counts. Read with `FINAL` (`db.rows()` does) or let merges settle.
 - Materialized views are first class: created by `yail migrate`, backfilled over existing data with `yail migrate --populate`.
+  They sum rows as they are inserted, before dedup, so a re-insert (replay, re-index) counts twice.
+- Refreshable materialized views (`materializedView(name, { to, from, query, refresh: { schedule: "EVERY 1 HOUR", append: true, populate } })`)
+  re-run their SELECT on a schedule into a real table, so they can join across rows and tables, which an insert-time
+  view cannot. With `append` the query covers a recent window and the target's ReplacingMergeTree key dedups it;
+  `populate` is the unwindowed query `yail migrate --populate` runs once for the history. ClickHouse >= 24.
+- Plain views (``view("balances", sql`SELECT … FROM ${ledger} FINAL …`)``) hold no data: they run on every read, so they
+  always agree with their tables. `yail migrate` creates or replaces them, each after the views it reads.
 
 ### Handlers
 
@@ -125,10 +132,11 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
   context.db        // insert (buffered), find (buffer-aware), rows, query, command
   context.client    // viem readContract with a ClickHouse cache keyed by block (needs `rpc` on the chain)
   context.http      // fetch with optional ClickHouse cache: http.get(url, { cache: true })
+  context.cache     // an answer computed once per chain and key: context.cache({ key: ["tokenMetadata", address], handler: async () => … })
   context.addresses // has/register/list for address sets
   context.log       // evlog wide event of the current batch: log.set({ ... })
 });
-indexer.on("Wallets:transaction", ...) // EVM: { transaction, block, address, direction: "from"|"to"|"self" }
+indexer.on("Wallets:transaction", ...) // EVM: { transaction, block, address, direction, logs, traces }
                                       // Bitcoin: { tx, block, address, received, sent, net, fee, isSender }
 indexer.on("setup", ...)              // once per chain before indexing starts
 ```
@@ -136,6 +144,53 @@ indexer.on("setup", ...)              // once per chain before indexing starts
 Writes are buffered per source batch and flushed as one INSERT per table before the checkpoint is written. Events are processed in `(block, txIndex, logIndex)` order per chain; chains run concurrently. Only events with a registered handler are fetched from the source.
 
 `context.db.find(table, key)` looks at the current batch's buffer first, then ClickHouse. It is fine for last-value state (a pool's current tick), but the ClickHouse way is to write immutable facts and let `SummingMergeTree`/`AggregatingMergeTree` materialized views maintain aggregates.
+
+### Wallet activity
+
+An account normally matches the transactions an address sends or receives. With `activity: true` it matches every
+transaction that mentions the address: in any indexed log topic (token transfers, user operations, approvals…) or as the
+sender or recipient of a call trace. The event then carries the whole transaction: `event.logs` (all of its logs) and
+`event.traces` (all of its call frames), one event per transaction and address.
+
+```ts
+accounts: { Wallets: { chain: "base", address: addressSet("wallets"), activity: true } },
+```
+
+Traces come only from trace-enabled HyperSync endpoints (e.g. `https://eth-traces.hypersync.xyz`,
+`https://base-traces.hypersync.xyz`, a paid add-on), named in `hypersync({ traces })`; elsewhere `event.traces` is
+empty. Needs HyperSync (`rpc()` refuses whole-transaction queries). The whole-transaction query only carries the
+account's own filters: a contract's logs on the same chain are fetched apart and merged by block, so a DEX's every
+swap does not come back with its transaction and traces.
+
+### Cache
+
+`context.cache({ key, handler })` (after useQuery) computes an answer once per chain and key and keeps it in the store: a token's metadata over
+RPC, a price from an API, a request through a provider. Later calls read the store, concurrent calls share one run.
+The store is `cache.store` in the config: `memory()` (default, lives with the process) or `redis({ url })` (optional
+peer dependency `redis`), so re-indexes and restarts never ask again. What the indexer needs from the answer it writes
+to its own tables, like any other data.
+
+```ts
+indexer.on("Factory:PoolCreated", async ({ event, context }) => {
+  const address = event.args.token0.toLowerCase();
+  const metadata = await context.cache({
+    key: ["tokenMetadata", address],
+    handler: async () => {
+      const read = (functionName: "name" | "symbol" | "decimals") => context.client!.readContract({ address, abi: erc20Abi, functionName, noCache: true }).catch(() => null);
+      const [name, symbol, decimals] = await Promise.all([read("name"), read("symbol"), read("decimals")]);
+      return { name, symbol, decimals };
+    },
+  });
+  context.db.insert(tokens).values({ chain: context.chain.name, address, ...metadata });
+});
+```
+
+```ts
+// yail.config.ts
+cache: { store: redis({ url: process.env.REDIS_URL }) },
+```
+
+In tests, `seedCache(store, chain, key, output)` from `@notuslabs/yail/testing` fixes an answer so its function never runs.
 
 ### Dynamic addresses and backfill
 
@@ -221,6 +276,6 @@ yail status              --url http://localhost:42069
 ## Limits and notes
 
 - Bitcoin is scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs.
-- Traces / internal ETH transfers are not indexed (not exposed by HyperSync on most chains without a paid add-on).
+- Internal ETH transfers are only visible through traces, which HyperSync serves on a few chains as a paid add-on (see Wallet activity).
 - ClickHouse has no transactions: a crash between a table flush and the checkpoint is repaired by the ReplacingMergeTree key on the next run, so give every table a real identity key.
 - Cross-chain ordering is not enforced (chains are independent loops).

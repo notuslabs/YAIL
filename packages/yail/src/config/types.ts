@@ -2,6 +2,7 @@ import type { Abi } from "viem";
 import type { DatabaseConfig } from "../db/client.js";
 import type { Source } from "../sources/types.js";
 import type { AddressSetRef, FactoryRef } from "./address.js";
+import type { CacheStore } from "../cache/cached.js";
 
 export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRef;
 
@@ -64,6 +65,12 @@ export interface AccountConfig {
   address: AddressSpec;
   startBlock?: BlockRef;
   endBlock?: number;
+  /**
+   * Also match transactions that only mention the address: in an indexed log topic or as a call trace's
+   * sender or recipient (traces need a trace-enabled source). Events then carry every log and trace of the
+   * transaction. EVM only; needs HyperSync.
+   */
+  activity?: boolean;
 }
 
 export interface AddressSetConfig {
@@ -72,6 +79,8 @@ export interface AddressSetConfig {
 }
 
 export interface CacheConfig {
+  /** Where `context.cache` answers live: `memory()` (default, the process) or `redis({ url })`. */
+  store?: CacheStore;
   /** Cache raw source batches in ClickHouse (`_yail_source_cache`). Same effect as wrapping sources in `cached()`. */
   source?: boolean;
   /** Persist `context.http` responses in ClickHouse. Default true. */

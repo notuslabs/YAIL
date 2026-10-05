@@ -28,6 +28,8 @@ export interface EvmLogFilter {
   address?: string[];
   /** Per-position topic alternatives (OR within a position, AND across positions). `null` = any. */
   topics?: Array<string[] | null>;
+  /** Part of the query's `join`: the transactions this filter matches come back whole. Other filters do not. */
+  join?: boolean;
 }
 
 export interface EvmTxFilter {
@@ -37,11 +39,22 @@ export interface EvmTxFilter {
   to?: string[];
 }
 
+export interface EvmTraceFilter {
+  /** Caller addresses (OR). */
+  from?: string[];
+  /** Callee addresses (OR). Combined with `from` using AND (HyperSync semantics). */
+  to?: string[];
+}
+
 export interface EvmQuery extends RangeQuery {
   logs: EvmLogFilter[];
   transactions: EvmTxFilter[];
+  /** Call traces to match. Only trace-enabled sources return any (HyperSync `*-traces` endpoints). */
+  traces?: EvmTraceFilter[];
   /** Also return the transaction of every matched log. */
   includeLogTransactions?: boolean;
+  /** Return each matched transaction whole: the transaction, all of its logs and all of its traces. */
+  join?: boolean;
 }
 
 export interface EvmBlock {
@@ -64,6 +77,8 @@ export interface EvmTransaction {
   gasPrice?: bigint;
   gasUsed?: bigint;
   effectiveGasPrice?: bigint;
+  /** OP-stack chains: the L1 data fee, paid on top of `gasUsed * effectiveGasPrice`. */
+  l1Fee?: bigint;
   status?: number;
   type?: number;
   contractAddress?: string | null;
@@ -81,6 +96,23 @@ export interface EvmLog {
   removed?: boolean;
 }
 
+/** One call frame of a transaction (Parity-style trace). */
+export interface EvmTrace {
+  transactionHash: string;
+  blockNumber: number;
+  /** Position in the call tree: `[]` is the transaction's own call, `[0, 2]` the third call made by its first call. */
+  traceAddress: number[];
+  /** "call", "create", "suicide" or "reward". */
+  type: string;
+  /** For calls: "call", "delegatecall", "staticcall" or "callcode". */
+  callType?: string;
+  from: string;
+  to: string | null;
+  value: bigint;
+  /** Set when the frame reverted; its sub-calls are reverted with it. */
+  error?: string;
+}
+
 export interface RollbackGuard {
   blockNumber: number;
   hash: string;
@@ -92,6 +124,7 @@ export interface EvmBatch extends RangeBatch {
   blocks: EvmBlock[];
   transactions: EvmTransaction[];
   logs: EvmLog[];
+  traces?: EvmTrace[];
   rollbackGuard?: RollbackGuard;
   archiveHeight?: number;
 }

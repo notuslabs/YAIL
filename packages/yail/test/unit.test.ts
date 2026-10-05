@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseAbi } from "viem";
-import { t, table, materializedView, tableDdl, materializedViewDdl } from "../src/schema/index.js";
+import { t, table, materializedView, tableDdl, materializedViewDdl, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
 import { serializeRow, deserializeRow } from "../src/db/serialize.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -50,6 +50,13 @@ describe("schema", () => {
     expect(ddl).toContain("CREATE MATERIALIZED VIEW IF NOT EXISTS `db`.`ledger_daily_mv` TO `db`.`daily` AS");
     expect(ddl).toContain("FROM `db`.`ledger`");
     expect(tableDdl(daily)).toContain("ENGINE = SummingMergeTree()");
+  });
+
+  it("renders plain views that read tables and earlier views", () => {
+    const balances = view("balances", sql`SELECT wallet, sum(amount) AS balance FROM ${ledger} FINAL GROUP BY wallet`);
+    const rich = view("rich", sql`SELECT * FROM ${balances} WHERE balance > ${1000n}`);
+    expect(viewDdl(balances, "db")).toContain("CREATE OR REPLACE VIEW `db`.`balances` AS\nSELECT wallet, sum(amount) AS balance FROM `db`.`ledger` FINAL");
+    expect(viewDdl(rich, "db")).toContain("FROM `db`.`balances` WHERE balance > 1000");
   });
 
   it("serializes and deserializes rows", () => {
@@ -117,6 +124,19 @@ describe("plan", () => {
     expect(q.logs.every((l) => l.topics?.[0]?.[0] === TRANSFER)).toBe(true);
     expect(q.logs.some((l) => l.address !== undefined)).toBe(false); // no factory fetch in override mode
     expect(q.transactions).toEqual([{ from: ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }, { to: ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }]);
+  });
+
+  it("matches activity accounts through log topics and traces, and asks for whole transactions", async () => {
+    const registry = new AddressRegistry(fakeDb, (_c, a) => a.toLowerCase());
+    await registry.register({ set: "wallets", chain: "base", address: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", status: "live", adoptedAtBlock: 1 });
+    const activity = createConfig({ ...config, accounts: { Wallets: { chain: "base", address: addressSet("wallets"), activity: true } } });
+    const plan = buildPlans(activity, { handled: new Set(["Wallets:transaction"]), resolveLatest: () => 100 }).get("base")!;
+    const q = buildEvmQuery(plan, 0, 100, registry);
+    const wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const padded = padAddress(wallet);
+    expect(q.logs).toEqual([{ topics: [null, [padded]], join: true }, { topics: [null, null, [padded]], join: true }, { topics: [null, null, null, [padded]], join: true }]);
+    expect(q.traces).toEqual([{ from: [wallet] }, { to: [wallet] }]);
+    expect(q.join).toBe(true);
   });
 
   it("skips empty address sets instead of matching everything", () => {
