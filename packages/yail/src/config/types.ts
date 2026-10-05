@@ -7,17 +7,17 @@ import type { CacheStore } from "../cache/cached.js";
 export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRef;
 
 export interface ChainConfig<S extends Source = Source> {
-  /** Chain id (EVM) or a string id such as "bitcoin". */
+  /** Chain id (EVM) or a string id such as "bitcoin" or "solana". */
   id: number | string;
-  /** Data source: `hypersync()`, `rpc()`, `esplora()`, or any of them wrapped in `cached()`. */
+  /** Data source: `hypersync()`, `rpc()`, `esplora()`, `hypersyncSolana()`, `solanaRpc()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
   source: S;
   /** Optional JSON-RPC URL, enables `context.client.readContract` (EVM only). */
   rpc?: string;
-  /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin). */
+  /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin), 32 slots (Solana). */
   finality?: number;
   /** Poll interval in ms once caught up. Default: 2000 (EVM), 30000 (Bitcoin). */
   pollInterval?: number;
-  /** Max blocks per planned query. Default: 100000 (HyperSync), 2000 (RPC), 50000 (Bitcoin). */
+  /** Max blocks per planned query. Default: 100000 (HyperSync), 2000 (RPC), 50000 (Bitcoin), 5000000 slots (Solana). */
   maxBlockRange?: number;
 }
 
@@ -59,7 +59,7 @@ export interface ChainScopedAccount {
   endBlock?: number;
 }
 
-/** Index transactions sent from/to a set of addresses (EVM native transfers, Bitcoin UTXO movements). */
+/** Index transactions sent from/to a set of addresses (EVM native transfers, Bitcoin UTXO movements, Solana SOL and token balance changes). */
 export interface AccountConfig {
   chain: string | Readonly<Record<string, ChainScopedAccount>>;
   address: AddressSpec;

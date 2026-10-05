@@ -80,6 +80,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
     },
   };
   if (evmInner.getBlock) wrapped.getBlock = (n: number) => evmInner.getBlock!(n);
+  if (inner.firstBlock) wrapped.firstBlock = () => inner.firstBlock!();
   return wrapped as unknown as S;
 }
 
@@ -87,11 +88,17 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
 export function hashQuery(query: RangeQuery): string {
   const { fromBlock: _f, toBlock: _t, ...shape } = query as unknown as Record<string, unknown>;
   const json = JSON.stringify(shape, (_k, v) => {
-    if (typeof v === "string") return v.toLowerCase();
-    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map((x) => x.toLowerCase()).sort();
+    if (typeof v === "string") return hexLower(v);
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map(hexLower).sort();
     return v;
   });
   return createHash("sha256").update(json).digest("hex").slice(0, 32);
+}
+
+/** Hex is case-insensitive; base58 addresses (Solana, legacy Bitcoin) are not. */
+function hexLower(s: string): string {
+  if (s.startsWith("0x")) return s.toLowerCase();
+  return s;
 }
 
 export function serializeBatch(batch: unknown): string {
@@ -115,8 +122,8 @@ function untagBigint(_key: string, value: unknown): unknown {
 function clampBatch(batch: RangeBatch, next: number): RangeBatch {
   if (batch.nextBlock === next) return batch;
   const b: any = { ...batch, nextBlock: next };
-  for (const key of ["blocks", "transactions", "logs", "traces"]) {
-    if (Array.isArray(b[key])) b[key] = b[key].filter((x: any) => (x.number ?? x.blockNumber) < next);
+  for (const key of ["blocks", "transactions", "logs", "traces", "balances"]) {
+    if (Array.isArray(b[key])) b[key] = b[key].filter((x: any) => (x.number ?? x.blockNumber ?? x.blockHeight ?? x.slot) < next);
   }
   return b;
 }

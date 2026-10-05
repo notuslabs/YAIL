@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import type { Indexer } from "../indexer/indexer.js";
 import { schemaDdl } from "../db/migrate.js";
-import { recordEvmFixture, recordBitcoinFixture, writeFixture, type Fixture } from "../sources/fixture.js";
+import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture, type Fixture } from "../sources/fixture.js";
 import { bigintReplacer } from "../util.js";
-import { buildBitcoinQuery, buildEvmQuery } from "../indexer/plan.js";
+import { buildAddressQuery, buildEvmQuery } from "../indexer/plan.js";
 
 const HELP = `yail <command> [options]
 
@@ -135,8 +135,10 @@ export async function run(argv: string[]): Promise<void> {
       let fixture: Fixture;
       if (plan!.kind === "evm") {
         fixture = await recordEvmFixture(source as any, buildEvmQuery(plan!, from, to, registry), { name: values.chain, chainId: Number(plan!.config.id) });
+      } else if (plan!.kind === "solana") {
+        fixture = await recordSolanaFixture(source as any, buildAddressQuery(plan!, from, to, registry), { name: values.chain });
       } else {
-        fixture = await recordBitcoinFixture(source as any, buildBitcoinQuery(plan!, from, to, registry), { name: values.chain });
+        fixture = await recordBitcoinFixture(source as any, buildAddressQuery(plan!, from, to, registry), { name: values.chain });
       }
       writeFixture(resolve(values.out!), fixture);
       console.log(`wrote ${values.out}`);

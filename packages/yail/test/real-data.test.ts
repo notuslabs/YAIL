@@ -5,7 +5,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseAbi } from "viem";
-import { startTestClickHouse, readFixture, fixtureSource, type TestClickHouse, type EvmFixture, type BitcoinFixture } from "../src/testing/index.js";
+import { startTestClickHouse, readFixture, fixtureSource, type TestClickHouse, type EvmFixture, type BitcoinFixture, type SolanaFixture } from "../src/testing/index.js";
+import { union } from "../src/sources/union.js";
 import { createConfig, addressSet } from "../src/config/index.js";
 import { createIndexer } from "../src/indexer/indexer.js";
 import type { HandlerContext } from "../src/indexer/context.js";
@@ -181,5 +182,58 @@ describe("Bitcoin wallets via Esplora", () => {
       expect(BigInt(r.received) - BigInt(r.sent)).toBe(s.balance);
       expect(Number(r.n)).toBe(s.txCount);
     }
+  });
+});
+
+describe("Solana wallet via union(HyperSync, RPC)", () => {
+  const recent = readFixture<SolanaFixture>(`${fixtures}solana-wallet-hypersync.json`);
+  const early = readFixture<SolanaFixture>(`${fixtures}solana-wallet-rpc.json`);
+  const expected = recent.expected as { wallet: string; first: number; slot: number; floor: number; lamports: bigint; tokens: Record<string, { mint: string; amount: bigint }> };
+  const solLedger = table(
+    "sol_ledger",
+    { wallet: t.string(), signature: t.string(), account: t.string(), mint: t.string(), delta: t.int256(), slot: t.uint64() },
+    { orderBy: ["wallet", "signature", "account"], scopes: { wallet: "wallet" } },
+  );
+  let db: Db | undefined;
+  afterAll(async () => {
+    await db?.close();
+  });
+
+  it("serves the same rows from both sources below the floor", () => {
+    const strip = (rows: SolanaFixture["balances"]) => rows.map((b) => JSON.stringify({ ...b, transactionIndex: 0 }, (_k, v) => (typeof v === "bigint" ? v.toString() : v))).sort();
+    const below = recent.balances.filter((b) => b.slot < expected.floor);
+    expect(below.length).toBeGreaterThan(0);
+    expect(strip(early.balances)).toEqual(strip(below));
+  });
+
+  it("sums to the SOL and token balances read from the chain", async () => {
+    // The HyperSync fixture refuses slots below `floor`: the union must take them from RPC.
+    const source = union(fixtureSource(recent, { blocksPerBatch: 200_000 }), fixtureSource(early, { blocksPerBatch: 200_000 }));
+    const config = createConfig({
+      database: ch.database(),
+      chains: { solana: { id: "solana", source, finality: 0 } },
+      addressSets: { sol: { initial: [expected.wallet] } },
+      accounts: { SolWallets: { chain: "solana", address: addressSet("sol"), startBlock: expected.first, endBlock: expected.slot } },
+      server: { port: false },
+      observability: { pretty: false },
+    });
+    const indexer = createIndexer({ config, schema: { solLedger } });
+    let fromRpc = 0;
+    indexer.on("SolWallets:transaction", async ({ event, context }) => {
+      expect(context.chain.kind).toBe("solana");
+      if (event.block.slot < expected.floor) fromRpc++;
+      const at = { wallet: event.address, signature: event.transaction.signature, slot: BigInt(event.block.slot) };
+      if (event.lamports !== 0n) context.db.insert(solLedger).values({ ...at, account: event.address, mint: "", delta: event.lamports });
+      for (const tk of event.tokens) context.db.insert(solLedger).values({ ...at, account: tk.account, mint: tk.mint, delta: tk.delta });
+    });
+    await indexer.run();
+    db = indexer.db;
+    expect(fromRpc).toBe(early.transactions.length);
+    const rows = await indexer.db.query<{ account: string; mint: string; total: string }>(sql`SELECT account, mint, sum(delta) AS total FROM ${solLedger} FINAL GROUP BY account, mint`);
+    const totals = new Map(rows.map((r) => [r.account, BigInt(r.total)]));
+    expect(totals.get(expected.wallet)).toBe(expected.lamports);
+    for (const [account, token] of Object.entries(expected.tokens)) expect(totals.get(account) ?? 0n, `${token.mint} in ${account}`).toBe(token.amount);
+    // Token accounts closed since: everything that came in went out.
+    for (const r of rows) if (r.mint !== "" && !expected.tokens[r.account]) expect(BigInt(r.total), `closed ${r.account}`).toBe(0n);
   });
 });

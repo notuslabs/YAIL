@@ -8,16 +8,16 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, BitcoinSource, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction } from "../sources/types.js";
+import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type HandlerContext } from "./context.js";
 import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
-import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent } from "./events.js";
-import { buildBitcoinQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
-import type { BitcoinQuery, EvmQuery } from "../sources/types.js";
+import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent } from "./events.js";
+import { buildAddressQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
+import type { BitcoinQuery, EvmQuery, SolanaQuery } from "../sources/types.js";
 import { toArray } from "../util.js";
 
 export type Handler = (args: { event: any; context: HandlerContext<any, any> }) => Promise<void> | void;
@@ -42,7 +42,7 @@ interface DispatchEvent {
   txIndex: number;
   logIndex: number;
   name: string;
-  payload: ContractEvent | EvmAccountEvent | BitcoinAccountEvent;
+  payload: ContractEvent | EvmAccountEvent | BitcoinAccountEvent | SolanaAccountEvent;
 }
 
 /** Thrown by `step` when the loop is done (`once`, or past `endBlock`). */
@@ -265,14 +265,14 @@ export class ChainRunner {
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;
 
-    let query: EvmQuery | BitcoinQuery;
+    let query: EvmQuery | BitcoinQuery | SolanaQuery;
     let empty: boolean;
     if (this.plan.kind === "evm") {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       query = q;
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else {
-      const q = buildBitcoinQuery(this.plan, from, to, this.deps.registry, { override: options.override });
+      const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
       query = q;
       empty = q.addresses.length === 0;
     }
@@ -283,12 +283,12 @@ export class ChainRunner {
 
     let batchFrom = from;
     let sourceStart = performance.now();
-    const iterator = (source as EvmSource | BitcoinSource).fetch(query as any, { signal: options.signal })[Symbol.asyncIterator]();
+    const iterator = (source as EvmSource).fetch(query as EvmQuery, { signal: options.signal })[Symbol.asyncIterator]() as AsyncIterator<EvmBatch | BitcoinBatch | SolanaBatch>;
     for (;;) {
       const next = await iterator.next();
       const sourceMs = performance.now() - sourceStart;
       if (next.done) break;
-      const batch = next.value as EvmBatch | BitcoinBatch;
+      const batch = next.value;
       const started = performance.now();
       const wide = this.deps.obs.wide({ chain: this.chain, mode: options.label ?? modeLabel(live), fromBlock: batch.fromBlock, toBlock: batch.nextBlock - 1 });
       const writer = new BatchWriter(this.deps.db, { maxRows: flushMaxRows, onFlush: (s) => metrics.recordFlush(s.table, s.rows, s.ms) });
@@ -303,6 +303,8 @@ export class ChainRunner {
             if (live) await this.expandFactories(evmBatch, options.signal);
             eventCount = await this.dispatchEvm(evmBatch, context, meta, writer, options.override);
             if (live) await this.rememberHashes(evmBatch);
+          } else if (this.plan.kind === "solana") {
+            eventCount = await this.dispatchSolana(batch as SolanaBatch, context, meta, writer, options.override);
           } else {
             eventCount = await this.dispatchBitcoin(batch as BitcoinBatch, context, meta, writer, options.override);
           }
@@ -540,6 +542,31 @@ export class ChainRunner {
     return this.dispatch(events, context, meta, writer);
   }
 
+  // ------------------------------------------------------------ Solana
+
+  private async dispatchSolana(batch: SolanaBatch, context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter, override?: QueryBuildOptions["override"]): Promise<number> {
+    const blocks = new Map(batch.blocks.map((b) => [b.slot, b]));
+    const balancesOf = new Map<string, SolanaBatch["balances"]>();
+    for (const b of batch.balances) balancesOf.set(b.signature, [...(balancesOf.get(b.signature) ?? []), b]);
+    const events: DispatchEvent[] = [];
+    for (const a of this.plan.accounts) {
+      const name = `${a.name}:transaction`;
+      if (!this.deps.handlers.has(name)) continue;
+      const members = resolveAddresses(a.address, this.chain, this.deps.registry, override).addresses;
+      for (const tx of batch.transactions) {
+        if (tx.slot < a.startBlock || (a.endBlock !== undefined && tx.slot > a.endBlock)) continue;
+        const rows = balancesOf.get(tx.signature) ?? [];
+        const block = blocks.get(tx.slot) ?? { slot: tx.slot, time: 0 };
+        members.forEach((address, idx) => {
+          const payload = solanaAccountEvent(tx, block, rows, address);
+          if (payload) events.push({ block: tx.slot, txIndex: tx.transactionIndex, logIndex: idx, name, payload });
+        });
+      }
+    }
+    events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
+    return this.dispatch(events, context, meta, writer);
+  }
+
   // ------------------------------------------------------------ dispatch
 
   private async dispatch(events: DispatchEvent[], context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter): Promise<number> {
@@ -579,6 +606,8 @@ export class ChainRunner {
 
 function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: number; maxBlockRange: number } {
   if (plan.kind === "bitcoin") return { finality: 3, pollInterval: 30_000, maxBlockRange: 50_000 };
+  // ~32 slots (13 s) is Solana's finalized depth. Long ranges: hypersyncSolana fetches them in parallel windows.
+  if (plan.kind === "solana") return { finality: 32, pollInterval: 2_000, maxBlockRange: 5_000_000 };
   if (plan.config.source.name.startsWith("rpc")) return { finality: 20, pollInterval: 2_000, maxBlockRange: 2_000 };
   return { finality: 20, pollInterval: 2_000, maxBlockRange: 100_000 };
 }
@@ -597,7 +626,7 @@ function modeLabel(live: boolean): string {
 function describeEvent(e: DispatchEvent): Record<string, unknown> {
   const p = e.payload as any;
   if (p.log) return { block: e.block, tx: p.log.transactionHash, logIndex: p.log.logIndex, address: p.address };
-  if (p.transaction) return { block: e.block, tx: p.transaction.hash, address: p.address };
+  if (p.transaction) return { block: e.block, tx: p.transaction.hash ?? p.transaction.signature, address: p.address };
   if (p.tx) return { block: e.block, txid: p.tx.txid, address: p.address };
   return { block: e.block };
 }
