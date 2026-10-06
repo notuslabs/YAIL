@@ -478,8 +478,8 @@ export class ChainRunner {
       }
     }
 
-    const logsOf = byTransaction([...batch.logs].sort(logOrder));
-    const tracesOf = byTransaction(batch.traces ?? []);
+    const logsOf = groupBy([...batch.logs].sort(logOrder), (l) => l.transactionHash);
+    const tracesOf = groupBy(batch.traces ?? [], (t) => t.transactionHash);
     for (const a of this.plan.accounts) {
       const name = `${a.name}:transaction`;
       if (!this.deps.handlers.has(name)) continue;
@@ -503,7 +503,6 @@ export class ChainRunner {
       }
     }
 
-    events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
     return this.dispatch(events, context, meta, writer);
   }
 
@@ -538,7 +537,6 @@ export class ChainRunner {
         }
       }
     }
-    events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
     return this.dispatch(events, context, meta, writer);
   }
 
@@ -546,8 +544,7 @@ export class ChainRunner {
 
   private async dispatchSolana(batch: SolanaBatch, context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter, override?: QueryBuildOptions["override"]): Promise<number> {
     const blocks = new Map(batch.blocks.map((b) => [b.slot, b]));
-    const balancesOf = new Map<string, SolanaBatch["balances"]>();
-    for (const b of batch.balances) balancesOf.set(b.signature, [...(balancesOf.get(b.signature) ?? []), b]);
+    const balancesOf = groupBy(batch.balances, (b) => b.signature);
     const events: DispatchEvent[] = [];
     for (const a of this.plan.accounts) {
       const name = `${a.name}:transaction`;
@@ -556,20 +553,21 @@ export class ChainRunner {
       for (const tx of batch.transactions) {
         if (tx.slot < a.startBlock || (a.endBlock !== undefined && tx.slot > a.endBlock)) continue;
         const rows = balancesOf.get(tx.signature) ?? [];
-        const block = blocks.get(tx.slot) ?? { slot: tx.slot, time: 0 };
+        const block = blocks.get(tx.slot);
+        if (!block) throw createError({ message: `slot ${tx.slot} missing from ${this.plan.config.source.name} response`, why: "The source returned a transaction without its block", fix: "Check the source's field selection / fixture contents" });
         members.forEach((address, idx) => {
           const payload = solanaAccountEvent(tx, block, rows, address);
           if (payload) events.push({ block: tx.slot, txIndex: tx.transactionIndex, logIndex: idx, name, payload });
         });
       }
     }
-    events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
     return this.dispatch(events, context, meta, writer);
   }
 
   // ------------------------------------------------------------ dispatch
 
   private async dispatch(events: DispatchEvent[], context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter): Promise<number> {
+    events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
     const { metrics, log } = this.deps.obs;
     let count = 0;
     for (const e of events) {
@@ -631,12 +629,13 @@ function describeEvent(e: DispatchEvent): Record<string, unknown> {
   return { block: e.block };
 }
 
-function byTransaction<T extends { transactionHash: string }>(items: T[]): Map<string, T[]> {
+function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {
   const groups = new Map<string, T[]>();
   for (const item of items) {
-    const group = groups.get(item.transactionHash) ?? [];
+    const k = key(item);
+    const group = groups.get(k) ?? [];
     group.push(item);
-    groups.set(item.transactionHash, group);
+    groups.set(k, group);
   }
   return groups;
 }

@@ -1,7 +1,7 @@
 import { createPublicClient, http, type PublicClient } from "viem";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions, SolanaSource } from "./types.js";
 import { lower } from "./types.js";
-import { lowerOrNull } from "../util.js";
+import { lowerOrNull, mapLimit } from "../util.js";
 import { solanaRpc, type SolanaRpcOptions } from "./solana/rpc.js";
 
 export type { SolanaRpcOptions };
@@ -200,17 +200,6 @@ export function matchesTxFilters(from: string, to: string | null | undefined, fi
     const toOk = !filter.to || filter.to.length === 0 || (t !== null && filter.to.map(lower).includes(t));
     return fromOk && toOk;
   });
-}
-
-async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let i = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) {
-      const item = items[i++]!;
-      await fn(item);
-    }
-  });
-  await Promise.all(workers);
 }
 
 function hex(n: number): `0x${string}` {

@@ -7,6 +7,7 @@
 import { createPublicClient, http, parseAbi, toEventSelector } from "viem";
 import { rpc } from "../src/sources/rpc.js";
 import { hypersync } from "../src/sources/hypersync.js";
+import { TOKEN_PROGRAMS } from "../src/sources/solana/rpc.js";
 import { esplora } from "../src/sources/esplora.js";
 import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture } from "../src/sources/fixture.js";
 import { padAddress } from "../src/indexer/events.js";
@@ -163,7 +164,7 @@ async function recordSolana() {
   const slot = balance.context.slot;
   if (sigs[0]!.slot >= slot) throw new Error("the wallet just moved: run again");
   const tokens: Record<string, { mint: string; amount: bigint }> = {};
-  for (const programId of ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]) {
+  for (const programId of TOKEN_PROGRAMS) {
     const res = await call<{ context: { slot: number }; value: Array<{ pubkey: string; account: { data: { parsed: { info: { mint: string; tokenAmount: { amount: string } } } } } }> }>(
       "getTokenAccountsByOwner",
       [SOLANA_WALLET, { programId }, { encoding: "jsonParsed", commitment: "confirmed", minContextSlot: slot }],

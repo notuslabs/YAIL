@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { reviveBatch, serializeBatch } from "./cached.js";
 import { matchesTxFilters } from "./rpc.js";
-import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
+import { finishBatch, walletOf } from "./solana/shared.js";
+import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
 
 export interface EvmFixture {
@@ -108,11 +109,8 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
         let from = query.fromBlock;
         while (from < query.toBlock) {
           const to = Math.min(from + per, query.toBlock);
-          const balances = fixture.balances.filter((b) => b.slot >= from && b.slot < to && wallets.has(b.token ? b.token.owner : b.account));
-          const signatures = new Set(balances.map((b) => b.signature));
-          const transactions = fixture.transactions.filter((t) => signatures.has(t.signature));
-          const blocks = fixture.blocks.filter((b) => transactions.some((t) => t.slot === b.slot));
-          yield { fromBlock: from, nextBlock: to, blocks, transactions, balances } satisfies SolanaBatch;
+          const balances = fixture.balances.filter((b) => b.slot >= from && b.slot < to && wallets.has(walletOf(b)));
+          yield finishBatch({ fromBlock: from, nextBlock: to, blocks: fixture.blocks, transactions: fixture.transactions, balances });
           from = to;
         }
       },

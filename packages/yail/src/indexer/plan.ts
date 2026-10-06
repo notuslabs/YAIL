@@ -5,7 +5,7 @@ import type { AddressRegistry } from "../addresses/registry.js";
 import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter, SolanaQuery, SourceKind } from "../sources/types.js";
 import { abiEvents, compileFilter, eventTopic, padAddress, type CompiledEvent, type CompiledFilter } from "./events.js";
 import { perChain } from "../config/chain-ref.js";
-import { chunkList, toArray } from "../util.js";
+import { chunkList, normalizeHex, toArray } from "../util.js";
 
 export interface ContractSource {
   kind: "contract";
@@ -141,8 +141,8 @@ export interface QueryBuildOptions {
 /** Resolve the address list of a spec on a chain (empty = "match everything" for static specs). */
 export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"]): { any: boolean; addresses: string[]; set?: string } {
   if (spec === undefined) return { any: true, addresses: [] };
-  if (typeof spec === "string") return { any: false, addresses: [normalizeAddress(spec)] };
-  if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map(normalizeAddress) };
+  if (typeof spec === "string") return { any: false, addresses: [normalizeHex(spec)] };
+  if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map(normalizeHex) };
   if (isAddressSet(spec)) {
     if (override && override.set === spec.set) return { any: false, addresses: override.addresses, set: spec.set };
     return { any: false, addresses: registry.live(spec.set, chain), set: spec.set };
@@ -153,12 +153,6 @@ export function resolveAddresses(spec: AddressSpec | undefined, chain: string, r
     return { any: false, addresses: registry.live(set, chain), set };
   }
   return { any: true, addresses: [] };
-}
-
-/** EVM addresses are hex and compared lowercase; base58 ones (Solana, legacy Bitcoin) are case-sensitive. */
-function normalizeAddress(address: string): string {
-  if (address.startsWith("0x")) return address.toLowerCase();
-  return address;
 }
 
 // Factory refs do not carry the contract name; the plan attaches it. We keep a WeakMap for lookup.

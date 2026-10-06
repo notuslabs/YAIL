@@ -1,4 +1,5 @@
 import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, FetchOptions } from "./types.js";
+import { mapLimit, request } from "../util.js";
 
 export interface EsploraOptions {
   /** Esplora-compatible base URL: https://mempool.space/api or https://blockstream.info/api (or your own electrs). */
@@ -34,20 +35,9 @@ export function esplora(options: EsploraOptions): BitcoinSource {
   const concurrency = options.concurrency ?? 2;
 
   async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-    let attempt = 0;
-    for (;;) {
-      const res = await doFetch(`${base}${path}`, { headers: options.headers, signal });
-      if (res.status === 429 || res.status >= 500) {
-        attempt++;
-        if (attempt > 6) throw new Error(`esplora ${path}: HTTP ${res.status} after ${attempt} attempts`);
-        await sleep(Math.min(30_000, 500 * 2 ** attempt), signal);
-        continue;
-      }
-      if (!res.ok) throw new Error(`esplora ${path}: HTTP ${res.status} ${await res.text().catch(() => "")}`);
-      const text = await res.text();
-      if (text.startsWith("{") || text.startsWith("[")) return JSON.parse(text) as T;
-      return text as T;
-    }
+    const text = await request(doFetch, `${base}${path}`, { headers: options.headers, signal });
+    if (text.startsWith("{") || text.startsWith("[")) return JSON.parse(text) as T;
+    return text as T;
   }
 
   async function scanAddress(address: string, fromBlock: number, toBlock: number, signal?: AbortSignal): Promise<EsploraTx[]> {
@@ -84,16 +74,8 @@ export function esplora(options: EsploraOptions): BitcoinSource {
     },
     async *fetch(query: BitcoinQuery, fetchOptions?: FetchOptions) {
       const byId = new Map<string, EsploraTx>();
-      let i = 0;
-      const addrs = query.addresses;
-      const workers = Array.from({ length: Math.min(concurrency, addrs.length) }, async () => {
-        while (i < addrs.length) {
-          const a = addrs[i++]!;
-          const txs = await scanAddress(a, query.fromBlock, query.toBlock, fetchOptions?.signal);
-          for (const tx of txs) byId.set(tx.txid, tx);
-        }
-      });
-      await Promise.all(workers);
+      const scans = await mapLimit(query.addresses, concurrency, (a) => scanAddress(a, query.fromBlock, query.toBlock, fetchOptions?.signal));
+      for (const tx of scans.flat()) byId.set(tx.txid, tx);
       const txs = [...byId.values()]
         .map(toTransaction)
         .sort((a, b) => a.blockHeight - b.blockHeight || a.txid.localeCompare(b.txid));
@@ -142,14 +124,4 @@ function toTransaction(tx: EsploraTx): BitcoinTransaction {
 function toPrevout(prevout: EsploraTx["vin"][number]["prevout"]): BitcoinTransaction["vin"][number]["prevout"] {
   if (!prevout) return null;
   return { address: prevout.scriptpubkey_address ?? null, value: BigInt(prevout.value) };
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      reject(signal.reason);
-    });
-  });
 }

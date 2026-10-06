@@ -2,6 +2,7 @@ import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type Ab
 import type { Config, EventFilter } from "../config/types.js";
 import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaTransaction } from "../sources/types.js";
 import { isAddressSet } from "../config/address.js";
+import { walletOf } from "../sources/solana/shared.js";
 import { toArray } from "../util.js";
 
 // ------------------------------------------------------------ type level
@@ -207,7 +208,7 @@ export function bitcoinAccountEvent(tx: BitcoinTransaction, address: string): Bi
 
 /** The wallet's slice of a transaction's balances, or null when the transaction has none. */
 export function solanaAccountEvent(transaction: SolanaTransaction, block: SolanaBlock, rows: SolanaBalance[], address: string): SolanaAccountEvent | null {
-  const balances = rows.filter((b) => (b.token ? b.token.owner : b.account) === address);
+  const balances = rows.filter((b) => walletOf(b) === address);
   if (balances.length === 0) return null;
   let lamports = 0n;
   const tokens: SolanaAccountEvent["tokens"] = [];

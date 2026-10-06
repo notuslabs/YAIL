@@ -1,5 +1,11 @@
 import type { SolanaBalance, SolanaBatch, SolanaBlock, SolanaTransaction } from "../types.js";
 
+/** The wallet a balance row belongs to: a token account's owner, otherwise the account itself. */
+export function walletOf(b: Pick<SolanaBalance, "account" | "token">): string {
+  if (b.token) return b.token.owner;
+  return b.account;
+}
+
 /** A balance row, with `lamports` only when they changed: every Solana source reports the same rows. */
 export function solanaBalance(at: Pick<SolanaBalance, "signature" | "slot" | "transactionIndex" | "account">, preLamports: bigint, postLamports: bigint, token?: SolanaBalance["token"]): SolanaBalance {
   const balance: SolanaBalance = { ...at };
@@ -21,32 +27,4 @@ export function finishBatch(batch: SolanaBatch): SolanaBatch {
   const slots = new Set(batch.transactions.map((t) => t.slot));
   batch.blocks = batch.blocks.filter((b: SolanaBlock) => slots.has(b.slot)).sort((a, b) => a.slot - b.slot);
   return batch;
-}
-
-/** HTTP with retries on 429, 5xx and network errors. */
-export async function request(doFetch: typeof fetch, url: string, init: RequestInit): Promise<string> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const res = await doFetch(url, init);
-      if (res.ok) return await res.text();
-      const body = await res.text().catch(() => "");
-      if (res.status !== 429 && res.status < 500) throw new HttpError(`${url}: HTTP ${res.status} ${body.slice(0, 300)}`);
-      if (attempt === 12) throw new Error(`${url}: HTTP ${res.status} after ${attempt} attempts`);
-    } catch (err) {
-      if (err instanceof HttpError || init.signal?.aborted || attempt === 12) throw err;
-    }
-    await sleep(Math.min(30_000, 250 * 2 ** attempt), init.signal ?? undefined);
-  }
-}
-
-class HttpError extends Error {}
-
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      reject(signal.reason);
-    });
-  });
 }
