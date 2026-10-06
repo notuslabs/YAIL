@@ -3,7 +3,7 @@ import type { Db } from "../db/client.js";
 import { sql } from "../db/sql.js";
 import { sourceCache } from "../db/internal.js";
 import { normalizeHex } from "../util.js";
-import type { BitcoinSource, EvmSource, FetchOptions, RangeBatch, RangeQuery, Source } from "./types.js";
+import type { BatchOf, BitcoinSource, EvmSource, FetchOptions, QueryOf, RangeQuery, Source } from "./types.js";
 
 export interface CachedSourceOptions {
   db: Db;
@@ -21,12 +21,12 @@ export interface CachedSourceOptions {
  * shape (filters) so different filter sets never mix.
  */
 export function cached<S extends Source>(inner: S, options: CachedSourceOptions): S {
-  const evmInner = inner as EvmSource;
-  const wrapped: Record<string, unknown> = {
+  const fetch = inner.fetch.bind(inner) as (query: QueryOf<S>, options?: FetchOptions) => AsyncIterable<BatchOf<S>>;
+  const wrapped = {
     kind: inner.kind,
     name: `cached(${inner.name})`,
     getHeight: () => inner.getHeight(),
-    async *fetch(query: RangeQuery, fetchOptions?: FetchOptions): AsyncIterable<RangeBatch> {
+    async *fetch(query: QueryOf<S>, fetchOptions?: FetchOptions): AsyncIterable<BatchOf<S>> {
       const queryHash = hashQuery(query);
       const cachedRanges = await options.db.query<{ from_block: string; next_block: string }>(
         sql`SELECT from_block, next_block FROM ${sourceCache} FINAL
@@ -47,7 +47,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
           );
           const payload = rows[0]?.payload;
           if (payload) {
-            const batch = reviveBatch(payload) as RangeBatch;
+            const batch = reviveBatch(payload) as BatchOf<S>;
             const next = Math.min(batch.nextBlock, query.toBlock);
             options.onEvent?.({ type: "hit", fromBlock: cursor, nextBlock: next });
             yield clampBatch(batch, next);
@@ -60,34 +60,35 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
         if (hit) missEnd = Math.min(hit.from, missEnd);
         options.onEvent?.({ type: "miss", fromBlock: cursor, nextBlock: missEnd });
         const finalized = options.finalizedHeight?.();
-        for await (const batch of (inner as EvmSource).fetch({ ...(query as any), fromBlock: cursor, toBlock: missEnd }, fetchOptions)) {
-          const b = batch as unknown as RangeBatch;
-          if (finalized === undefined || b.nextBlock - 1 <= finalized) {
+        for await (const batch of fetch({ ...query, fromBlock: cursor, toBlock: missEnd }, fetchOptions)) {
+          if (finalized === undefined || batch.nextBlock - 1 <= finalized) {
             await options.db.insert(sourceCache).values({
               chain: options.chain,
               queryHash,
-              fromBlock: BigInt(b.fromBlock),
-              nextBlock: BigInt(b.nextBlock),
-              payload: serializeBatch(b),
+              fromBlock: BigInt(batch.fromBlock),
+              nextBlock: BigInt(batch.nextBlock),
+              payload: serializeBatch(batch),
               createdAt: new Date(),
             });
-            options.onEvent?.({ type: "store", fromBlock: b.fromBlock, nextBlock: b.nextBlock });
+            options.onEvent?.({ type: "store", fromBlock: batch.fromBlock, nextBlock: batch.nextBlock });
           }
-          yield b;
-          cursor = b.nextBlock;
+          yield batch;
+          cursor = batch.nextBlock;
         }
         if (cursor < missEnd) throw new Error(`cached(${inner.name}): inner source stopped at ${cursor} before ${missEnd}`);
       }
     },
   };
-  if (evmInner.getBlock) wrapped.getBlock = (n: number) => evmInner.getBlock!(n);
-  if (inner.firstBlock) wrapped.firstBlock = () => inner.firstBlock!();
-  return wrapped as unknown as S;
+  return {
+    ...wrapped,
+    ...(inner.kind === "evm" && inner.getBlock ? { getBlock: (n: number) => inner.getBlock!(n) } : {}),
+    ...(inner.firstBlock ? { firstBlock: () => inner.firstBlock!() } : {}),
+  } as S;
 }
 
 /** Hash of the query minus its block range. */
 export function hashQuery(query: RangeQuery): string {
-  const { fromBlock: _f, toBlock: _t, ...shape } = query as unknown as Record<string, unknown>;
+  const { fromBlock: _f, toBlock: _t, ...shape } = query;
   const json = JSON.stringify(shape, (_k, v) => {
     if (typeof v === "string") return normalizeHex(v);
     if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map(normalizeHex).sort();
@@ -110,17 +111,32 @@ function tagBigint(_key: string, value: unknown): unknown {
 }
 
 function untagBigint(_key: string, value: unknown): unknown {
-  if (value && typeof value === "object" && typeof (value as { $big?: unknown }).$big === "string") return BigInt((value as { $big: string }).$big);
+  if (value && typeof value === "object" && "$big" in value && typeof value.$big === "string") return BigInt(value.$big);
   return value;
 }
 
-function clampBatch(batch: RangeBatch, next: number): RangeBatch {
+function clampBatch<B extends BatchOf<Source>>(batch: B, next: number): B {
   if (batch.nextBlock === next) return batch;
-  const b: any = { ...batch, nextBlock: next };
-  for (const key of ["blocks", "transactions", "logs", "traces", "balances"]) {
-    if (Array.isArray(b[key])) b[key] = b[key].filter((x: any) => (x.number ?? x.blockNumber ?? x.blockHeight ?? x.slot) < next);
+  if ("logs" in batch) {
+    return {
+      ...batch,
+      nextBlock: next,
+      blocks: batch.blocks.filter((b) => b.number < next),
+      transactions: batch.transactions.filter((t) => t.blockNumber < next),
+      logs: batch.logs.filter((l) => l.blockNumber < next),
+      ...(batch.traces ? { traces: batch.traces.filter((t) => t.blockNumber < next) } : {}),
+    };
   }
-  return b;
+  if ("balances" in batch) {
+    return {
+      ...batch,
+      nextBlock: next,
+      blocks: batch.blocks.filter((b) => b.slot < next),
+      transactions: batch.transactions.filter((t) => t.slot < next),
+      balances: batch.balances.filter((b) => b.slot < next),
+    };
+  }
+  return { ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) };
 }
 
 export type { EvmSource, BitcoinSource };

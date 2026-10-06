@@ -1,5 +1,5 @@
 import type { Abi, AbiEvent } from "viem";
-import type { AccountConfig, AddressSpec, ChainConfig, Config, ContractConfig } from "../config/types.js";
+import type { AddressSpec, ChainConfig, Config } from "../config/types.js";
 import { factorySetName, isAddressSet, isFactory, type FactoryRef } from "../config/address.js";
 import type { AddressRegistry } from "../addresses/registry.js";
 import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter, SolanaQuery, SourceKind } from "../sources/types.js";
@@ -52,9 +52,9 @@ export interface PlanOptions {
   resolveLatest: (chain: string) => number;
 }
 
-export function buildPlans(config: Config<any, any, any>, options: PlanOptions): Map<string, ChainPlan> {
+export function buildPlans(config: Config, options: PlanOptions): Map<string, ChainPlan> {
   const plans = new Map<string, ChainPlan>();
-  for (const [chain, cfg] of Object.entries(config.chains as Record<string, ChainConfig>)) {
+  for (const [chain, cfg] of Object.entries(config.chains)) {
     plans.set(chain, { chain, config: cfg, kind: cfg.source.kind, contracts: [], accounts: [], startBlock: Number.MAX_SAFE_INTEGER, sets: new Map() });
   }
   const resolveBlock = (chain: string, v: number | "latest" | undefined, fallback: number): number => {
@@ -62,7 +62,7 @@ export function buildPlans(config: Config<any, any, any>, options: PlanOptions):
     return v ?? fallback;
   };
 
-  for (const [name, c] of Object.entries((config.contracts ?? {}) as Record<string, ContractConfig>)) {
+  for (const [name, c] of Object.entries(config.contracts ?? {})) {
     for (const [chain, override] of Object.entries(perChain(c.chain))) {
       const plan = plans.get(chain)!;
       if (plan.kind !== "evm") throw new Error(`contract "${name}": chain "${chain}" is not an EVM chain`);
@@ -87,7 +87,7 @@ export function buildPlans(config: Config<any, any, any>, options: PlanOptions):
     }
   }
 
-  for (const [name, a] of Object.entries((config.accounts ?? {}) as Record<string, AccountConfig>)) {
+  for (const [name, a] of Object.entries(config.accounts ?? {})) {
     if (!options.handled.has(`${name}:transaction`)) continue;
     for (const [chain, override] of Object.entries(perChain(a.chain))) {
       const plan = plans.get(chain)!;
@@ -139,31 +139,17 @@ export interface QueryBuildOptions {
 }
 
 /** Resolve the address list of a spec on a chain (empty = "match everything" for static specs). */
-export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"]): { any: boolean; addresses: string[]; set?: string } {
+export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"], factorySet?: string): { any: boolean; addresses: string[]; set?: string } {
   if (spec === undefined) return { any: true, addresses: [] };
   if (typeof spec === "string") return { any: false, addresses: [normalizeHex(spec)] };
   if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map(normalizeHex) };
-  if (isAddressSet(spec)) {
-    if (override && override.set === spec.set) return { any: false, addresses: override.addresses, set: spec.set };
-    return { any: false, addresses: registry.live(spec.set, chain), set: spec.set };
-  }
-  if (isFactory(spec)) {
-    const set = factorySetName(currentFactoryName(spec));
+  if (isAddressSet(spec) || isFactory(spec)) {
+    const set = isAddressSet(spec) ? spec.set : factorySet;
+    if (set === undefined) throw new Error("factory addresses require the contract's set");
     if (override && override.set === set) return { any: false, addresses: override.addresses, set };
     return { any: false, addresses: registry.live(set, chain), set };
   }
   return { any: true, addresses: [] };
-}
-
-// Factory refs do not carry the contract name; the plan attaches it. We keep a WeakMap for lookup.
-const factoryNames = new WeakMap<FactoryRef, string>();
-export function bindFactoryName(ref: FactoryRef, name: string): void {
-  factoryNames.set(ref, name);
-}
-function currentFactoryName(ref: FactoryRef): string {
-  const n = factoryNames.get(ref);
-  if (!n) throw new Error("factory ref not bound to a contract");
-  return n;
 }
 
 export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): EvmQuery {
@@ -177,7 +163,6 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
 
   for (const c of plan.contracts) {
     if (!(c.startBlock < to && (c.endBlock === undefined || c.endBlock >= from))) continue;
-    if (c.factory) bindFactoryName(c.factory.ref, c.name);
     const usesOverride =
       override !== undefined &&
       ((isAddressSet(c.address) && c.address.set === override.set) ||
@@ -193,7 +178,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
     }
     if (c.events.length === 0) continue;
     const topic0s = c.events.map((e) => e.topic0);
-    const resolved = resolveAddresses(c.address, plan.chain, registry, override);
+    const resolved = resolveAddresses(c.address, plan.chain, registry, override, c.factory?.set);
     if (!resolved.any && resolved.addresses.length === 0) continue; // empty dynamic set: nothing to fetch yet
     let addressChunks: Array<string[] | undefined> = [undefined];
     if (!resolved.any) addressChunks = chunkList(resolved.addresses, chunk);

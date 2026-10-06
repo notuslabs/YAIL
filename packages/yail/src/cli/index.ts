@@ -131,14 +131,14 @@ export async function run(argv: string[]): Promise<void> {
       const registry = indexer.internals.registry;
       const from = Number(values.from);
       const to = Number(values.to);
-      const source = plan!.config.source;
+      const source = plan.config.source;
       let fixture: Fixture;
-      if (plan!.kind === "evm") {
-        fixture = await recordEvmFixture(source as any, buildEvmQuery(plan!, from, to, registry), { name: values.chain, chainId: Number(plan!.config.id) });
-      } else if (plan!.kind === "solana") {
-        fixture = await recordSolanaFixture(source as any, buildAddressQuery(plan!, from, to, registry), { name: values.chain });
+      if (source.kind === "evm") {
+        fixture = await recordEvmFixture(source, buildEvmQuery(plan, from, to, registry), { name: values.chain, chainId: Number(plan.config.id) });
+      } else if (source.kind === "solana") {
+        fixture = await recordSolanaFixture(source, buildAddressQuery(plan, from, to, registry), { name: values.chain });
       } else {
-        fixture = await recordBitcoinFixture(source as any, buildAddressQuery(plan!, from, to, registry), { name: values.chain });
+        fixture = await recordBitcoinFixture(source, buildAddressQuery(plan, from, to, registry), { name: values.chain });
       }
       writeFixture(resolve(values.out!), fixture);
       console.log(`wrote ${values.out}`);

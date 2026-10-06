@@ -17,7 +17,7 @@ import { toArray } from "../util.js";
 export interface HandlerDb extends Omit<Db, "insert"> {
   /** Buffered insert. Rows become visible in ClickHouse after the batch flushes (before the checkpoint is written). */
   insert<T extends Table<any>>(table: T): { values(rows: InsertRow<T> | InsertRow<T>[]): void };
-  /** Buffer-aware cached: returns the latest row written in this batch for the key, else reads ClickHouse (FINAL). */
+  /** Returns the latest row buffered for the key, else reads ClickHouse (FINAL). */
   find<T extends Table<any>>(table: T, key: Partial<InferRow<T>>): Promise<InferRow<T> | null>;
   /** Force a flush now (rarely needed). */
   flush(): Promise<void>;
@@ -71,7 +71,7 @@ export function createHandlerDb(db: Db, writer: BatchWriter, meta: { current: Ro
     insert(table) {
       return {
         values(rows) {
-          for (const r of toArray<any>(rows)) writer.add(table, r, meta.current);
+          for (const r of toArray<InsertRow<typeof table>>(rows)) writer.add(table, r, meta.current);
         },
       };
     },
@@ -103,7 +103,7 @@ export function createContext(deps: ContextDeps): HandlerContext<any, string> {
           .then((rows) => rows[0]!),
       list: (set, chain) => deps.registry.list({ set, chain: chain ?? deps.chain.name }),
     },
-    contracts: deps.contracts as any,
+    contracts: deps.contracts,
     log: deps.log,
     backfill: deps.backfill,
   };
