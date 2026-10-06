@@ -1,9 +1,14 @@
 import { createPublicClient, http, type PublicClient } from "viem";
-import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions } from "./types.js";
+import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions, SolanaSource } from "./types.js";
 import { lower } from "./types.js";
 import { lowerOrNull } from "../util.js";
+import { solanaRpc, type SolanaRpcOptions } from "./solana/rpc.js";
+
+export type { SolanaRpcOptions };
 
 export interface RpcSourceOptions {
+  /** The chain's kind. Default "evm"; `{ kind: "solana" }` takes `SolanaRpcOptions`. */
+  kind?: "evm";
   url: string;
   /** Blocks per eth_getLogs request. Default 2000 (most public RPCs cap at 2k-10k). */
   blockRange?: number;
@@ -32,7 +37,15 @@ interface RawLog {
  * needs no token, and is what the recorded test fixtures are captured with.
  * Account (from/to) filters require scanning full blocks; keep ranges small.
  */
-export function rpc(options: RpcSourceOptions): EvmSource {
+export function rpc(options: RpcSourceOptions): EvmSource;
+/** Solana wallets over JSON-RPC, address by address: any slot, cost grows with the wallets' transactions. */
+export function rpc(options: SolanaRpcOptions): SolanaSource;
+export function rpc(options: RpcSourceOptions | SolanaRpcOptions): EvmSource | SolanaSource {
+  if (options.kind === "solana") return solanaRpc(options);
+  return evmRpc(options);
+}
+
+function evmRpc(options: RpcSourceOptions): EvmSource {
   const client = options.client ?? createPublicClient({ transport: http(options.url, { batch: true, retryCount: 5 }) });
   const blockRange = options.blockRange ?? 2000;
   const concurrency = options.concurrency ?? 4;

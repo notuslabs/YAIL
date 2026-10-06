@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { reviveBatch, serializeBatch } from "./cached.js";
 import { matchesTxFilters } from "./rpc.js";
-import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, Source } from "./types.js";
+import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
 
 export interface EvmFixture {
@@ -32,7 +32,22 @@ export interface BitcoinFixture {
   expected?: Record<string, unknown>;
 }
 
-export type Fixture = EvmFixture | BitcoinFixture;
+export interface SolanaFixture {
+  version: 1;
+  kind: "solana";
+  name?: string;
+  height: number;
+  /** Replayed as the source's `firstBlock()`, to stand in for a source with partial history. */
+  firstBlock?: number;
+  fromBlock: number;
+  toBlock: number;
+  blocks: SolanaBlock[];
+  transactions: SolanaTransaction[];
+  balances: SolanaBalance[];
+  expected?: Record<string, unknown>;
+}
+
+export type Fixture = EvmFixture | BitcoinFixture | SolanaFixture;
 
 /**
  * Replay a recorded fixture as a source. Queries are answered by filtering
@@ -41,6 +56,7 @@ export type Fixture = EvmFixture | BitcoinFixture;
  */
 export function fixtureSource(fixture: EvmFixture, options?: { blocksPerBatch?: number }): EvmSource;
 export function fixtureSource(fixture: BitcoinFixture, options?: { blocksPerBatch?: number }): BitcoinSource;
+export function fixtureSource(fixture: SolanaFixture, options?: { blocksPerBatch?: number }): SolanaSource;
 export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: number } = {}): Source {
   const per = options.blocksPerBatch ?? 1000;
   if (fixture.kind === "evm") {
@@ -77,6 +93,31 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
         return fixture.blocks.find((b) => b.number === n) ?? null;
       },
     };
+    return src;
+  }
+  if (fixture.kind === "solana") {
+    const src: SolanaSource = {
+      kind: "solana",
+      name: `fixture(${fixture.name ?? "solana"})`,
+      async getHeight() {
+        return fixture.height;
+      },
+      async *fetch(query: SolanaQuery) {
+        if (query.fromBlock < (fixture.firstBlock ?? 0)) throw new Error(`fixture(${fixture.name}): asked for slot ${query.fromBlock}, below its first block ${fixture.firstBlock}`);
+        const wallets = new Set(query.addresses);
+        let from = query.fromBlock;
+        while (from < query.toBlock) {
+          const to = Math.min(from + per, query.toBlock);
+          const balances = fixture.balances.filter((b) => b.slot >= from && b.slot < to && wallets.has(b.token ? b.token.owner : b.account));
+          const signatures = new Set(balances.map((b) => b.signature));
+          const transactions = fixture.transactions.filter((t) => signatures.has(t.signature));
+          const blocks = fixture.blocks.filter((b) => transactions.some((t) => t.slot === b.slot));
+          yield { fromBlock: from, nextBlock: to, blocks, transactions, balances } satisfies SolanaBatch;
+          from = to;
+        }
+      },
+    };
+    if (fixture.firstBlock !== undefined) src.firstBlock = async () => fixture.firstBlock!;
     return src;
   }
   const btc: BitcoinSource = {
@@ -133,6 +174,16 @@ export async function recordEvmFixture(source: EvmSource, query: EvmQuery, meta:
 export async function recordBitcoinFixture(source: BitcoinSource, query: BitcoinQuery, meta: { name?: string; expected?: Record<string, unknown> } = {}): Promise<BitcoinFixture> {
   const fx: BitcoinFixture = { version: 1, kind: "bitcoin", name: meta.name, height: await source.getHeight(), fromBlock: query.fromBlock, toBlock: query.toBlock, transactions: [], expected: meta.expected };
   for await (const batch of source.fetch(query)) fx.transactions.push(...batch.transactions);
+  return fx;
+}
+
+export async function recordSolanaFixture(source: SolanaSource, query: SolanaQuery, meta: { name?: string; expected?: Record<string, unknown> } = {}): Promise<SolanaFixture> {
+  const fx: SolanaFixture = { version: 1, kind: "solana", name: meta.name, height: await source.getHeight(), fromBlock: query.fromBlock, toBlock: query.toBlock, blocks: [], transactions: [], balances: [], expected: meta.expected };
+  for await (const batch of source.fetch(query)) {
+    fx.blocks.push(...batch.blocks);
+    fx.transactions.push(...batch.transactions);
+    fx.balances.push(...batch.balances);
+  }
   return fx;
 }
 

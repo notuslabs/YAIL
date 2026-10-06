@@ -4,6 +4,14 @@ export function toArray<T>(value: T | readonly T[]): T[] {
   return [value as T];
 }
 
+/** Split a list into consecutive slices of at most `size` items. */
+export function chunkList<T>(list: T[], size: number): T[][] {
+  if (list.length === 0) return [];
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
 /** JSON.stringify replacer that turns bigints into decimal strings. */
 export function bigintReplacer(_key: string, value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();

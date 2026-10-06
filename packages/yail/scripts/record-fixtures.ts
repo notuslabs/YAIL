@@ -1,16 +1,20 @@
 /**
  * Records real on-chain data into test/fixtures/*.json together with ground
  * truth read from the chain at the same blocks. Re-run to refresh:
- *   pnpm tsx scripts/record-fixtures.ts [pool|usdc|bitcoin]
+ *   pnpm tsx scripts/record-fixtures.ts [pool|usdc|bitcoin|solana]
+ * `solana` needs ENVIO_API_TOKEN (HyperSync); SOLANA_RPC_URL defaults to the public mainnet RPC.
  */
 import { createPublicClient, http, parseAbi, toEventSelector } from "viem";
 import { rpc } from "../src/sources/rpc.js";
+import { hypersync } from "../src/sources/hypersync.js";
 import { esplora } from "../src/sources/esplora.js";
-import { recordEvmFixture, recordBitcoinFixture, writeFixture } from "../src/sources/fixture.js";
+import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture } from "../src/sources/fixture.js";
 import { padAddress } from "../src/indexer/events.js";
 
 const BASE_RPC = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
 const ESPLORA = process.env.ESPLORA_URL ?? "https://mempool.space/api";
+const SOLANA_RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+const SOLANA_WALLET = process.env.SOLANA_WALLET ?? "8dVSpuXXqZmvsTJbTTut7acjhxUmknABHR6RhSkPNawV"; // a few hundred txs since 2026-10-01, ~50 tokens
 const POOL = "0xd0b53d9277642d899df5c87a3966a349a798f224"; // Uniswap V3 WETH/USDC 0.05% on Base
 const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const POOL_RANGE = { from: 51_800_000, to: 51_800_150 };
@@ -139,7 +143,51 @@ async function recordBitcoin() {
   console.log(`bitcoin: ${fixture.transactions.length} txs for ${chosen.length} addresses`);
 }
 
+/**
+ * One wallet's whole history, read from HyperSync, plus its first transactions read again over RPC. The test replays
+ * them through `union()` with HyperSync's floor moved up to `expected.floor`, so the start comes from RPC, and checks
+ * the summed changes against the balances read from the chain at `expected.slot`.
+ */
+async function recordSolana() {
+  const call = async <T>(method: string, params: unknown[]): Promise<T> => {
+    const r = await fetch(SOLANA_RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    const body = (await r.json()) as { result?: T; error?: unknown };
+    if (!body.result) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
+    return body.result;
+  };
+  const sigs = await call<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1000 }]);
+  if (sigs.length === 1000) throw new Error("pick a wallet with fewer than 1000 transactions");
+  const first = sigs.at(-1)!.slot;
+  // SOL and every open token account. The reads land on different slots: they agree when the wallet did nothing in between.
+  const balance = await call<{ context: { slot: number }; value: number }>("getBalance", [SOLANA_WALLET, { commitment: "confirmed" }]);
+  const slot = balance.context.slot;
+  if (sigs[0]!.slot >= slot) throw new Error("the wallet just moved: run again");
+  const tokens: Record<string, { mint: string; amount: bigint }> = {};
+  for (const programId of ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]) {
+    const res = await call<{ context: { slot: number }; value: Array<{ pubkey: string; account: { data: { parsed: { info: { mint: string; tokenAmount: { amount: string } } } } } }> }>(
+      "getTokenAccountsByOwner",
+      [SOLANA_WALLET, { programId }, { encoding: "jsonParsed", commitment: "confirmed", minContextSlot: slot }],
+    );
+    for (const a of res.value) tokens[a.pubkey] = { mint: a.account.data.parsed.info.mint, amount: BigInt(a.account.data.parsed.info.tokenAmount.amount) };
+  }
+  const [latest] = await call<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1 }]);
+  if (latest!.slot !== sigs[0]!.slot) throw new Error("the wallet moved while its balances were read: run again");
+  const hs = hypersync({ kind: "solana", concurrency: 32 });
+  while ((await hs.getHeight()) <= slot) await new Promise((r) => setTimeout(r, 2000));
+  const query = { fromBlock: first, toBlock: slot + 1, addresses: [SOLANA_WALLET] };
+  const fixture = await recordSolanaFixture(hs, query, { name: "solana-wallet-hypersync" });
+  // HyperSync "starts" after the wallet's first ten transactions: those are read over RPC.
+  const floor = fixture.transactions[9]!.slot + 1;
+  const early = await recordSolanaFixture(rpc({ kind: "solana", url: SOLANA_RPC, concurrency: 1 }), { ...query, toBlock: floor }, { name: "solana-wallet-rpc" });
+  fixture.firstBlock = floor;
+  fixture.expected = { wallet: SOLANA_WALLET, first, slot, floor, lamports: BigInt(balance.value), tokens };
+  writeFixture(`${out}solana-wallet-hypersync.json`, fixture);
+  writeFixture(`${out}solana-wallet-rpc.json`, early);
+  console.log(`solana: ${fixture.transactions.length} txs (${early.transactions.length} over RPC below ${floor}), ${Object.keys(tokens).length} token accounts, slot ${slot}`);
+}
+
 const which = process.argv[2];
 if (!which || which === "pool") await recordPool();
 if (!which || which === "usdc") await recordUsdc();
 if (!which || which === "bitcoin") await recordBitcoin();
+if (!which || which === "solana") await recordSolana();

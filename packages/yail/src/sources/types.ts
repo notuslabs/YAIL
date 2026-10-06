@@ -1,12 +1,22 @@
 /**
  * Source abstraction. Every data provider (HyperSync, JSON-RPC, the cache
- * wrapper, Esplora for Bitcoin, recorded fixtures) implements the same
- * shape: `getHeight()` and `fetch(query)` yielding ordered, contiguous
+ * wrapper, Esplora for Bitcoin, Solana RPC, recorded fixtures) implements the
+ * same shape: `getHeight()` and `fetch(query)` yielding ordered, contiguous
  * batches of blocks/transactions/logs for a block range.
  */
 
 export interface FetchOptions {
   signal?: AbortSignal;
+}
+
+interface SourceBase {
+  readonly name: string;
+  getHeight(): Promise<number>;
+  /**
+   * First block the source holds data for. Absent means the whole chain. `union()` sends nothing below it, so a
+   * source with partial history (Solana HyperSync keeps only recent slots) never gets a range it cannot serve.
+   */
+  firstBlock?(): Promise<number>;
 }
 
 export interface RangeQuery {
@@ -129,10 +139,8 @@ export interface EvmBatch extends RangeBatch {
   archiveHeight?: number;
 }
 
-export interface EvmSource {
+export interface EvmSource extends SourceBase {
   readonly kind: "evm";
-  readonly name: string;
-  getHeight(): Promise<number>;
   fetch(query: EvmQuery, options?: FetchOptions): AsyncIterable<EvmBatch>;
   /** Optional: block header lookup (used for reorg checks and `startBlock: "latest"`). */
   getBlock?(number: number): Promise<EvmBlock | null>;
@@ -172,17 +180,67 @@ export interface BitcoinBatch extends RangeBatch {
   transactions: BitcoinTransaction[];
 }
 
-export interface BitcoinSource {
+export interface BitcoinSource extends SourceBase {
   readonly kind: "bitcoin";
-  readonly name: string;
-  getHeight(): Promise<number>;
   fetch(query: BitcoinQuery, options?: FetchOptions): AsyncIterable<BitcoinBatch>;
 }
 
-export type Source = EvmSource | BitcoinSource;
+// ---------------------------------------------------------------- Solana
+// Blocks are slots: `fromBlock`/`toBlock`/`nextBlock` count slots.
+
+export interface SolanaQuery extends RangeQuery {
+  /** Wallets. Each one matches its own (SOL) account and every token account it owns. */
+  addresses: string[];
+}
+
+export interface SolanaBlock {
+  slot: number;
+  /** Unix seconds. */
+  time: number;
+  hash?: string;
+  parentHash?: string;
+}
+
+export interface SolanaTransaction {
+  /** The transaction id (its first signature). */
+  signature: string;
+  slot: number;
+  /** Order of the transaction inside its slot. */
+  transactionIndex: number;
+  feePayer: string;
+  /** Lamports, charged to the fee payer even when the transaction failed. */
+  fee: bigint;
+  success: boolean;
+}
+
+/** One account whose SOL or tokens changed in one transaction, before and after. */
+export interface SolanaBalance {
+  signature: string;
+  slot: number;
+  transactionIndex: number;
+  account: string;
+  /** The account's lamports, when they changed. A token account holds its rent here, not its tokens. */
+  lamports?: { pre: bigint; post: bigint };
+  /** Set when the account is a token account: its tokens, in raw units. */
+  token?: { mint: string; owner: string; decimals: number; pre: bigint; post: bigint };
+}
+
+export interface SolanaBatch extends RangeBatch {
+  blocks: SolanaBlock[];
+  transactions: SolanaTransaction[];
+  /** Changed balances of the queried wallets' accounts only (their SOL account and the token accounts they own). */
+  balances: SolanaBalance[];
+}
+
+export interface SolanaSource extends SourceBase {
+  readonly kind: "solana";
+  fetch(query: SolanaQuery, options?: FetchOptions): AsyncIterable<SolanaBatch>;
+}
+
+export type Source = EvmSource | BitcoinSource | SolanaSource;
 export type SourceKind = Source["kind"];
-export type QueryOf<S extends Source> = S extends EvmSource ? EvmQuery : BitcoinQuery;
-export type BatchOf<S extends Source> = S extends EvmSource ? EvmBatch : BitcoinBatch;
+export type QueryOf<S extends Source> = S extends EvmSource ? EvmQuery : S extends BitcoinSource ? BitcoinQuery : SolanaQuery;
+export type BatchOf<S extends Source> = S extends EvmSource ? EvmBatch : S extends BitcoinSource ? BitcoinBatch : SolanaBatch;
 
 /** Sort key for deterministic ordering of logs within a chain. */
 export function logOrder(a: EvmLog, b: EvmLog): number {

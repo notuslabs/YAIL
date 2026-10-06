@@ -10,6 +10,7 @@ import { memory } from "../cache/stores.js";
 import type { InferRow, InsertRow, Table } from "../schema/table.js";
 import type { WideLogger } from "../observability/logger.js";
 import type { Config } from "../config/types.js";
+import type { SourceKind } from "../sources/types.js";
 import { toArray } from "../util.js";
 
 /** `context.db`: same as `Db` but inserts are buffered and flushed per batch. */
@@ -31,7 +32,7 @@ export interface AddressesApi {
 }
 
 export interface HandlerContext<C extends Config<any, any, any> = Config<any, any, any>, chain extends string = string> {
-  chain: { name: chain; id: number | string; kind: "evm" | "bitcoin" };
+  chain: { name: chain; id: number | string; kind: SourceKind };
   db: HandlerDb;
   /** Cached contract reads; only defined for EVM chains with `rpc` configured. */
   client: CachedClient | undefined;
@@ -53,7 +54,7 @@ export interface ContextDeps {
   registry: AddressRegistry;
   http: HttpClient;
   client: CachedClient | undefined;
-  chain: { name: string; id: number | string; kind: "evm" | "bitcoin" };
+  chain: { name: string; id: number | string; kind: SourceKind };
   contracts: Record<string, { abi: Abi; address?: string }>;
   defaultFromBlock: (set: string) => number;
   log: WideLogger;

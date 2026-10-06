@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseConfig } from "../db/client.js";
 
-export { fixtureSource, readFixture, writeFixture, recordEvmFixture, recordBitcoinFixture } from "../sources/fixture.js";
-export type { Fixture, EvmFixture, BitcoinFixture } from "../sources/fixture.js";
+export { fixtureSource, readFixture, writeFixture, recordEvmFixture, recordBitcoinFixture, recordSolanaFixture } from "../sources/fixture.js";
+export type { Fixture, EvmFixture, BitcoinFixture, SolanaFixture } from "../sources/fixture.js";
 export { readMemoryLogs } from "evlog/memory";
 export { seedCache } from "../cache/cached.js";
 

@@ -2,10 +2,10 @@ import type { Abi, AbiEvent } from "viem";
 import type { AccountConfig, AddressSpec, ChainConfig, Config, ContractConfig } from "../config/types.js";
 import { factorySetName, isAddressSet, isFactory, type FactoryRef } from "../config/address.js";
 import type { AddressRegistry } from "../addresses/registry.js";
-import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter } from "../sources/types.js";
+import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter, SolanaQuery, SourceKind } from "../sources/types.js";
 import { abiEvents, compileFilter, eventTopic, padAddress, type CompiledEvent, type CompiledFilter } from "./events.js";
 import { perChain } from "../config/chain-ref.js";
-import { toArray } from "../util.js";
+import { chunkList, toArray } from "../util.js";
 
 export interface ContractSource {
   kind: "contract";
@@ -35,7 +35,7 @@ export interface AccountSource {
 export interface ChainPlan {
   chain: string;
   config: ChainConfig;
-  kind: "evm" | "bitcoin";
+  kind: SourceKind;
   contracts: ContractSource[];
   accounts: AccountSource[];
   /** Earliest block any source starts at. */
@@ -141,8 +141,8 @@ export interface QueryBuildOptions {
 /** Resolve the address list of a spec on a chain (empty = "match everything" for static specs). */
 export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"]): { any: boolean; addresses: string[]; set?: string } {
   if (spec === undefined) return { any: true, addresses: [] };
-  if (typeof spec === "string") return { any: false, addresses: [spec.toLowerCase()] };
-  if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map((a) => a.toLowerCase()) };
+  if (typeof spec === "string") return { any: false, addresses: [normalizeAddress(spec)] };
+  if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map(normalizeAddress) };
   if (isAddressSet(spec)) {
     if (override && override.set === spec.set) return { any: false, addresses: override.addresses, set: spec.set };
     return { any: false, addresses: registry.live(spec.set, chain), set: spec.set };
@@ -153,6 +153,12 @@ export function resolveAddresses(spec: AddressSpec | undefined, chain: string, r
     return { any: false, addresses: registry.live(set, chain), set };
   }
   return { any: true, addresses: [] };
+}
+
+/** EVM addresses are hex and compared lowercase; base58 ones (Solana, legacy Bitcoin) are case-sensitive. */
+function normalizeAddress(address: string): string {
+  if (address.startsWith("0x")) return address.toLowerCase();
+  return address;
 }
 
 // Factory refs do not carry the contract name; the plan attaches it. We keep a WeakMap for lookup.
@@ -252,7 +258,8 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   return { fromBlock: from, toBlock: to, logs, transactions, traces, includeLogTransactions, join };
 }
 
-export function buildBitcoinQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery {
+/** Bitcoin and Solana queries: the addresses of every account source active in the range. */
+export function buildAddressQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery & SolanaQuery {
   const addresses = new Set<string>();
   for (const a of plan.accounts) {
     if (!(a.startBlock < to && (a.endBlock === undefined || a.endBlock >= from))) continue;
@@ -262,13 +269,6 @@ export function buildBitcoinQuery(plan: ChainPlan, from: number, to: number, reg
     for (const x of resolved.addresses) addresses.add(x);
   }
   return { fromBlock: from, toBlock: to, addresses: [...addresses] };
-}
-
-export function chunkList<T>(list: T[], size: number): T[][] {
-  if (list.length === 0) return [];
-  const out: T[][] = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
-  return out;
 }
 
 function cartesian<T>(lists: T[][]): T[][] {

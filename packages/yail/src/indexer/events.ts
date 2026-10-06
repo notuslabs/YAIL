@@ -1,6 +1,6 @@
 import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type ContractEventName, type DecodeEventLogReturnType } from "viem";
 import type { Config, EventFilter } from "../config/types.js";
-import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction } from "../sources/types.js";
+import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaTransaction } from "../sources/types.js";
 import { isAddressSet } from "../config/address.js";
 import { toArray } from "../util.js";
 
@@ -61,6 +61,19 @@ export interface BitcoinAccountEvent {
   isSender: boolean;
 }
 
+export interface SolanaAccountEvent {
+  /** The matched wallet. */
+  address: string;
+  transaction: SolanaTransaction;
+  block: SolanaBlock;
+  /** The wallet's own account and the token accounts it owns, where they changed, before and after. */
+  balances: SolanaBalance[];
+  /** Change of the wallet's SOL, in lamports (the fee included when the wallet paid it). */
+  lamports: bigint;
+  /** Token accounts of the wallet whose balance changed, with the change in raw token units. */
+  tokens: Array<{ account: string; mint: string; decimals: number; delta: bigint }>;
+}
+
 export interface SetupEvent {
   /** Block the chain starts (or resumes) indexing from. */
   block: number;
@@ -70,12 +83,9 @@ type ChainKind<C extends Config<any, any, any>, ref> = ref extends string
   ? C["chains"][ref]["source"]["kind"]
   : C["chains"][keyof ref & string]["source"]["kind"];
 
-export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> =
-  ChainKind<C, AccountsOf<C>[K]["chain"]> extends "bitcoin"
-    ? BitcoinAccountEvent
-    : ChainKind<C, AccountsOf<C>[K]["chain"]> extends "evm"
-      ? EvmAccountEvent
-      : EvmAccountEvent | BitcoinAccountEvent;
+type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; solana: SolanaAccountEvent };
+
+export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> = AccountEventByKind[ChainKind<C, AccountsOf<C>[K]["chain"]> & keyof AccountEventByKind];
 
 export type EventOf<C extends Config<any, any, any>, name extends string> = name extends "setup"
   ? SetupEvent
@@ -193,4 +203,17 @@ export function bitcoinAccountEvent(tx: BitcoinTransaction, address: string): Bi
   }
   if (received === 0n && sent === 0n) return null;
   return { address, tx, block: { height: tx.blockHeight, hash: tx.blockHash, time: tx.blockTime }, received, sent, net: received - sent, fee: tx.fee, isSender };
+}
+
+/** The wallet's slice of a transaction's balances, or null when the transaction has none. */
+export function solanaAccountEvent(transaction: SolanaTransaction, block: SolanaBlock, rows: SolanaBalance[], address: string): SolanaAccountEvent | null {
+  const balances = rows.filter((b) => (b.token ? b.token.owner : b.account) === address);
+  if (balances.length === 0) return null;
+  let lamports = 0n;
+  const tokens: SolanaAccountEvent["tokens"] = [];
+  for (const b of balances) {
+    if (!b.token) lamports += (b.lamports?.post ?? 0n) - (b.lamports?.pre ?? 0n);
+    else if (b.token.post !== b.token.pre) tokens.push({ account: b.account, mint: b.token.mint, decimals: b.token.decimals, delta: b.token.post - b.token.pre });
+  }
+  return { address, transaction, block, balances, lamports, tokens };
 }
