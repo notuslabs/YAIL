@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { union } from "../src/sources/union.js";
-import { hypersyncSolana } from "../src/sources/hypersync-solana.js";
+import { hypersync } from "../src/sources/hypersync.js";
+import { rpc } from "../src/sources/rpc.js";
 import { hashQuery } from "../src/sources/cached.js";
 import { fixtureSource } from "../src/sources/fixture.js";
 import { buildAddressQuery, buildPlans } from "../src/indexer/plan.js";
@@ -87,7 +88,7 @@ describe("union()", () => {
   });
 });
 
-describe("hypersyncSolana()", () => {
+describe("hypersync({ kind: \"solana\" })", () => {
   /** A fake server that holds slots from `floor` on and counts requests. */
   function server(floor: number) {
     const bodies: any[] = [];
@@ -103,7 +104,7 @@ describe("hypersyncSolana()", () => {
 
   it("finds where its history starts with tiny probes, then checks it with one", async () => {
     const { fake, bodies } = server(391_000_000);
-    const source = hypersyncSolana({ apiToken: "t", fetch: fake });
+    const source = hypersync({ kind: "solana", apiToken: "t", fetch: fake });
     expect(await source.firstBlock!()).toBe(391_000_000);
     expect(bodies.length).toBeLessThan(32);
     // Probes match nothing: they ask for no account activity at all.
@@ -115,7 +116,7 @@ describe("hypersyncSolana()", () => {
 
   it("reads long ranges in parallel windows, yielded in order", async () => {
     const { fake, bodies } = server(0);
-    const source = hypersyncSolana({ apiToken: "t", fetch: fake, windowSlots: 100, concurrency: 3 });
+    const source = hypersync({ kind: "solana", apiToken: "t", fetch: fake, windowSlots: 100, concurrency: 3 });
     const out: Array<[number, number]> = [];
     for await (const b of source.fetch({ fromBlock: 0, toBlock: 450, addresses: ["W"] })) out.push([b.fromBlock, b.nextBlock]);
     expect(out).toEqual([
@@ -134,10 +135,22 @@ describe("hypersyncSolana()", () => {
       new Response(
         `{"next_slot":2,"blocks":[[{"slot":1,"block_time":5}]],"transactions":[[{"slot":1,"transaction_index":0,"transaction_id":"S","fee_payer":"W","success":true,"fee":5000}]],"account_activity":[[{"slot":1,"transaction_index":0,"transaction_id":"S","account":"W","pre_balance":${big},"post_balance":1}]]}`,
       )) as unknown as typeof fetch;
-    for await (const batch of hypersyncSolana({ apiToken: "t", fetch: fake }).fetch({ fromBlock: 1, toBlock: 2, addresses: ["W"] })) {
+    for await (const batch of hypersync({ kind: "solana", apiToken: "t", fetch: fake }).fetch({ fromBlock: 1, toBlock: 2, addresses: ["W"] })) {
       expect(batch.balances[0]!.lamports).toEqual({ pre: BigInt(big), post: 1n });
       expect(batch.transactions[0]!.fee).toBe(5000n);
     }
+  });
+});
+
+describe("sources by provider", () => {
+  it("pick the chain with kind, EVM by default", () => {
+    expect(hypersync({ url: "https://base.hypersync.xyz" }).kind).toBe("evm");
+    expect(hypersync({ kind: "solana" }).kind).toBe("solana");
+    expect(hypersync({ kind: "solana" }).name).toBe("hypersync(solana.hypersync.xyz)");
+    expect(rpc({ url: "https://mainnet.base.org" }).kind).toBe("evm");
+    const solana = rpc({ kind: "solana", url: "https://api.mainnet-beta.solana.com" });
+    expect(solana.kind).toBe("solana");
+    expect(union(hypersync({ kind: "solana" }), solana).name).toBe("union(hypersync(solana.hypersync.xyz), rpc(api.mainnet-beta.solana.com))");
   });
 });
 

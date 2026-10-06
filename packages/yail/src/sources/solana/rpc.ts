@@ -1,7 +1,8 @@
-import type { FetchOptions, SolanaBalance, SolanaBatch, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction } from "./types.js";
-import { finishBatch, request, solanaBalance } from "./hypersync-solana.js";
+import type { FetchOptions, SolanaBalance, SolanaBatch, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction } from "../types.js";
+import { finishBatch, request, solanaBalance } from "./shared.js";
 
 export interface SolanaRpcOptions {
+  kind: "solana";
   /** Solana JSON-RPC URL. The public https://api.mainnet-beta.solana.com throttles `getTransaction` hard (~0.5/s). */
   url: string;
   /** Parallel RPC calls. Default 4. */
@@ -39,7 +40,7 @@ interface RawTransaction {
 /**
  * Solana source over plain JSON-RPC, address by address: `getSignaturesForAddress` for each wallet and each token
  * account it owns, then `getTransaction` for each signature. Cost grows with the wallets' transactions, not with
- * the slot range, so it suits old history of a few wallets: put it after `hypersyncSolana()` in `union()`.
+ * the slot range, so it suits old history of a few wallets: put it after `hypersync({ kind: "solana" })` in `union()`.
  *
  * Token accounts come from `getTokenAccountsByOwner` (the open ones) and from the wallets' own transactions (closed
  * ones show up where the wallet created or closed them). Transfers into a token account need it: they do not name
@@ -58,7 +59,7 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
       if (typeof value === "number" && !Number.isSafeInteger(value) && context?.source && /^\d+$/.test(context.source)) return BigInt(context.source);
       return value;
     }) as { result?: T; error?: { code: number; message: string } };
-    if (res.error) throw new Error(`solanaRpc ${method}: ${res.error.code} ${res.error.message}`);
+    if (res.error) throw new Error(`rpc(${new URL(options.url).host}) ${method}: ${res.error.code} ${res.error.message}`);
     return res.result as T;
   }
 
@@ -85,7 +86,7 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
 
   return {
     kind: "solana",
-    name: `solanaRpc(${new URL(options.url).host})`,
+    name: `rpc(${new URL(options.url).host})`,
     async getHeight() {
       return call<number>("getSlot", [{ commitment: "confirmed" }]);
     },

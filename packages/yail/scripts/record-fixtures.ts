@@ -6,9 +6,8 @@
  */
 import { createPublicClient, http, parseAbi, toEventSelector } from "viem";
 import { rpc } from "../src/sources/rpc.js";
+import { hypersync } from "../src/sources/hypersync.js";
 import { esplora } from "../src/sources/esplora.js";
-import { hypersyncSolana } from "../src/sources/hypersync-solana.js";
-import { solanaRpc } from "../src/sources/solana-rpc.js";
 import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture } from "../src/sources/fixture.js";
 import { padAddress } from "../src/indexer/events.js";
 
@@ -173,13 +172,13 @@ async function recordSolana() {
   }
   const [latest] = await call<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1 }]);
   if (latest!.slot !== sigs[0]!.slot) throw new Error("the wallet moved while its balances were read: run again");
-  const hs = hypersyncSolana({ concurrency: 32 });
+  const hs = hypersync({ kind: "solana", concurrency: 32 });
   while ((await hs.getHeight()) <= slot) await new Promise((r) => setTimeout(r, 2000));
   const query = { fromBlock: first, toBlock: slot + 1, addresses: [SOLANA_WALLET] };
   const fixture = await recordSolanaFixture(hs, query, { name: "solana-wallet-hypersync" });
   // HyperSync "starts" after the wallet's first ten transactions: those are read over RPC.
   const floor = fixture.transactions[9]!.slot + 1;
-  const early = await recordSolanaFixture(solanaRpc({ url: SOLANA_RPC, concurrency: 1 }), { ...query, toBlock: floor }, { name: "solana-wallet-rpc" });
+  const early = await recordSolanaFixture(rpc({ kind: "solana", url: SOLANA_RPC, concurrency: 1 }), { ...query, toBlock: floor }, { name: "solana-wallet-rpc" });
   fixture.firstBlock = floor;
   fixture.expected = { wallet: SOLANA_WALLET, first, slot, floor, lamports: BigInt(balance.value), tokens };
   writeFixture(`${out}solana-wallet-hypersync.json`, fixture);

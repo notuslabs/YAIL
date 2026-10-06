@@ -72,15 +72,15 @@ Everything the indexer writes is a plain ClickHouse table. An API reads it with 
 
 ### Sources
 
-A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batches of blocks, transactions and logs.
+A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batches of blocks, transactions and logs. Sources are named after the provider; `kind` picks the chain when a provider serves more than one (`hypersync()` and `rpc()` are EVM unless given `kind: "solana"`).
 
 | source | use |
 |---|---|
 | `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
-| `hypersyncSolana({ apiToken? })` | Solana wallets through Solana HyperSync: their SOL and the token accounts they own. Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
-| `solanaRpc({ url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions |
+| `hypersync({ kind: "solana", apiToken? })` | Solana wallets through Solana HyperSync: their SOL and the token accounts they own. Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
+| `rpc({ kind: "solana", url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions |
 | `union(a, b, …)` | one chain from several sources: each range goes to the first source that holds it (see below) |
 | `cached(source, { db, chain })` | ClickHouse page cache in front of any source; `cache: { source: true }` in the config does this for every chain |
 | `fixtureSource(fixture)` | replay recorded data in tests |
@@ -88,10 +88,10 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 A source may report the first block it holds (`firstBlock()`). `union()` uses it so that a source with partial history only ever gets ranges it can serve:
 
 ```ts
-solana: { id: "solana", source: union(hypersyncSolana(), solanaRpc({ url: process.env.SOLANA_RPC_URL! })) },
+solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind: "solana", url: process.env.SOLANA_RPC_URL! })) },
 ```
 
-Recent slots come from HyperSync (a range scan: cheap per wallet set, any number of wallets), older ones from RPC (per address: cheap for the rare wallet with old history). Address backfills fetch their whole range in one go, so the RPC pages each wallet once. `hypersyncSolana` finds where its history starts with one-slot probes that match nothing (a binary search the first time, then one probe per hour, since the floor only moves down). The head is the first source's.
+Recent slots come from HyperSync (a range scan: cheap per wallet set, any number of wallets), older ones from RPC (per address: cheap for the rare wallet with old history). Address backfills fetch their whole range in one go, so the RPC pages each wallet once. Solana HyperSync finds where its history starts with one-slot probes that match nothing (a binary search the first time, then one probe per hour, since the floor only moves down). The head is the first source's.
 
 The runtime only ever indexes blocks `<= head - finality` (default 20 blocks on EVM, 3 on Bitcoin, 32 slots on Solana), so reorgs are a non-issue in practice. HyperSync's rollback guard is still checked; on a mismatch the last window is re-indexed automatically.
 
@@ -290,7 +290,7 @@ yail status              --url http://localhost:42069
 ## Limits and notes
 
 - Bitcoin is scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs.
-- Solana HyperSync keeps only recent slots, and plain Solana RPC throttles `getTransaction` (the public endpoint to ~0.5/s): use a paid RPC behind `solanaRpc` for older history at any scale. Transfers into a token account do not name its owner, so `solanaRpc` also walks the wallet's token accounts (open ones from `getTokenAccountsByOwner`, closed ones from the wallet's own transactions).
+- Solana HyperSync keeps only recent slots, and plain Solana RPC throttles `getTransaction` (the public endpoint to ~0.5/s): use a paid RPC behind `rpc({ kind: "solana" })` for older history at any scale. Transfers into a token account do not name its owner, so the Solana `rpc` also walks the wallet's token accounts (open ones from `getTokenAccountsByOwner`, closed ones from the wallet's own transactions).
 - Internal ETH transfers are only visible through traces, which HyperSync serves on a few chains as a paid add-on (see Wallet activity).
 - ClickHouse has no transactions: a crash between a table flush and the checkpoint is repaired by the ReplacingMergeTree key on the next run, so give every table a real identity key.
 - Cross-chain ordering is not enforced (chains are independent loops).

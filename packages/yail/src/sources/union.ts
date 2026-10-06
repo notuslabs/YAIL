@@ -7,7 +7,7 @@ const FLOOR_TTL_MS = 60 * 60 * 1000;
  * Several sources of one chain as one. Each block range goes to the first source, in the given order, that holds
  * it, so the usual shape is the fast source first and a complete one after it:
  *
- *   union(hypersyncSolana(), solanaRpc({ url }))   // recent slots from HyperSync, older ones over RPC
+ *   union(hypersync({ kind: "solana" }), rpc({ kind: "solana", url }))   // recent slots from HyperSync, older ones over RPC
  *
  * Where a source's data starts comes from its `firstBlock()`. A source is never asked for a range below it.
  * The head (`getHeight`) is the first source's.

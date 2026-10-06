@@ -1,9 +1,14 @@
 import { HypersyncClient, JoinMode, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TraceField, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock, type Trace as HsTrace } from "@envio-dev/hypersync-client";
-import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, FetchOptions } from "./types.js";
+import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, FetchOptions, SolanaSource } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
 import { lowerOrNull } from "../util.js";
+import { solanaHypersync, type SolanaHypersyncOptions } from "./solana/hypersync.js";
+
+export type { SolanaHypersyncOptions };
 
 export interface HypersyncOptions {
+  /** The chain's kind. Default "evm"; `{ kind: "solana" }` takes `SolanaHypersyncOptions`. */
+  kind?: "evm";
   /** e.g. https://base.hypersync.xyz (see https://docs.envio.dev/docs/HyperSync/hypersync-supported-networks). */
   url: string;
   /**
@@ -29,7 +34,18 @@ const LOG_FIELDS = ["BlockNumber", "BlockHash", "TransactionHash", "TransactionI
 const TX_FIELDS = ["Hash", "BlockNumber", "TransactionIndex", "From", "To", "Value", "Input", "Nonce", "Gas", "GasPrice", "GasUsed", "EffectiveGasPrice", "L1Fee", "Status", "Type", "ContractAddress"] as const;
 const TRACE_FIELDS = ["TransactionHash", "BlockNumber", "TraceAddress", "Type", "CallType", "From", "To", "Value", "Error"] as const;
 
-export function hypersync(options: HypersyncOptions): EvmSource {
+/**
+ * Envio HyperSync. EVM by default (`hypersync({ url })`); `hypersync({ kind: "solana" })` reads Solana wallets
+ * from Solana HyperSync, which keeps only recent slots (see `union()` for older ones).
+ */
+export function hypersync(options: HypersyncOptions): EvmSource;
+export function hypersync(options: SolanaHypersyncOptions): SolanaSource;
+export function hypersync(options: HypersyncOptions | SolanaHypersyncOptions): EvmSource | SolanaSource {
+  if (options.kind === "solana") return solanaHypersync(options);
+  return evmHypersync(options);
+}
+
+function evmHypersync(options: HypersyncOptions): EvmSource {
   const clients = new Map<string, HypersyncClient>();
   const getClient = (url = options.url) => {
     // Resolved lazily so `yail ddl` / `yail migrate` work without a token.

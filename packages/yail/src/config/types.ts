@@ -9,7 +9,7 @@ export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRe
 export interface ChainConfig<S extends Source = Source> {
   /** Chain id (EVM) or a string id such as "bitcoin" or "solana". */
   id: number | string;
-  /** Data source: `hypersync()`, `rpc()`, `esplora()`, `hypersyncSolana()`, `solanaRpc()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
+  /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `esplora()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
   source: S;
   /** Optional JSON-RPC URL, enables `context.client.readContract` (EVM only). */
   rpc?: string;

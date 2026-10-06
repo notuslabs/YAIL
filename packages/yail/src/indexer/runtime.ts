@@ -606,7 +606,7 @@ export class ChainRunner {
 
 function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: number; maxBlockRange: number } {
   if (plan.kind === "bitcoin") return { finality: 3, pollInterval: 30_000, maxBlockRange: 50_000 };
-  // ~32 slots (13 s) is Solana's finalized depth. Long ranges: hypersyncSolana fetches them in parallel windows.
+  // ~32 slots (13 s) is Solana's finalized depth. Long ranges: Solana HyperSync fetches them in parallel windows.
   if (plan.kind === "solana") return { finality: 32, pollInterval: 2_000, maxBlockRange: 5_000_000 };
   if (plan.config.source.name.startsWith("rpc")) return { finality: 20, pollInterval: 2_000, maxBlockRange: 2_000 };
   return { finality: 20, pollInterval: 2_000, maxBlockRange: 100_000 };
