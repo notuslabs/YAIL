@@ -12,24 +12,23 @@ import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, Evm
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
-import { createContext, type HandlerContext } from "./context.js";
+import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
 import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent } from "./events.js";
 import { buildAddressQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
-import type { BitcoinQuery, EvmQuery, SolanaQuery } from "../sources/types.js";
 import { toArray } from "../util.js";
 
 export type Handler = (args: { event: any; context: HandlerContext<any, any> }) => Promise<void> | void;
 
 export interface RuntimeDeps {
-  config: Config<any, any, any>;
+  config: Config;
   db: Db;
   registry: AddressRegistry;
   obs: Observability;
   http: HttpClient;
   handlers: Map<string, Handler[]>;
-  contracts: Record<string, { abi: any; address?: string }>;
+  contracts: ContextDeps["contracts"];
   /** Called by the live loop when newly adopted addresses need history. */
   enqueueBackfill: (chain: string, job: { set: string; address: string; fromBlock: number; toBlock: number }) => Promise<void>;
   /** Called on a detected reorg to re-index a window. */
@@ -116,7 +115,7 @@ export class ChainRunner {
     for (const [set, def] of Object.entries(this.deps.config.addressSets ?? {})) {
       if (!this.plan.sets.has(set)) continue;
       for (const item of def.initial ?? []) {
-        const spec = seedSpec(item);
+        const spec = typeof item === "string" ? { address: item } : item;
         if (spec.chain && spec.chain !== this.chain) continue;
         await this.deps.registry.register({ set, chain: this.chain, address: spec.address, fromBlock: spec.fromBlock ?? this.plan.sets.get(set) ?? 0 });
       }
@@ -247,9 +246,7 @@ export class ChainRunner {
     for (const r of needBackfill) {
       await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: at });
     }
-    if (pending.length > 0) {
-      this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: at, live: liveNow.length, backfill: needBackfill.length });
-    }
+    this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: at, live: liveNow.length, backfill: needBackfill.length });
   }
 
   /**
@@ -265,15 +262,15 @@ export class ChainRunner {
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;
 
-    let query: EvmQuery | BitcoinQuery | SolanaQuery;
+    let fetchBatches: () => AsyncIterable<EvmBatch | BitcoinBatch | SolanaBatch>;
     let empty: boolean;
-    if (this.plan.kind === "evm") {
+    if (source.kind === "evm") {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
-      query = q;
+      fetchBatches = () => source.fetch(q, { signal: options.signal });
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else {
       const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
-      query = q;
+      fetchBatches = () => source.fetch(q, { signal: options.signal });
       empty = q.addresses.length === 0;
     }
     if (empty) {
@@ -283,14 +280,14 @@ export class ChainRunner {
 
     let batchFrom = from;
     let sourceStart = performance.now();
-    const iterator = (source as EvmSource).fetch(query as EvmQuery, { signal: options.signal })[Symbol.asyncIterator]() as AsyncIterator<EvmBatch | BitcoinBatch | SolanaBatch>;
+    const iterator = fetchBatches()[Symbol.asyncIterator]();
     for (;;) {
       const next = await iterator.next();
       const sourceMs = performance.now() - sourceStart;
       if (next.done) break;
       const batch = next.value;
       const started = performance.now();
-      const wide = this.deps.obs.wide({ chain: this.chain, mode: options.label ?? modeLabel(live), fromBlock: batch.fromBlock, toBlock: batch.nextBlock - 1 });
+      const wide = this.deps.obs.wide({ chain: this.chain, mode: options.label ?? (live ? "live" : "backfill"), fromBlock: batch.fromBlock, toBlock: batch.nextBlock - 1 });
       const writer = new BatchWriter(this.deps.db, { maxRows: flushMaxRows, onFlush: (s) => metrics.recordFlush(s.table, s.rows, s.ms) });
       const meta = { current: { chain: this.chain, block: batch.fromBlock, version: 0n } as RowMeta };
       const context = this.makeContext(writer, meta, wide, options.backfill);
@@ -316,9 +313,7 @@ export class ChainRunner {
         wide.error(err as Error);
         wide.set({ events: eventCount });
         wide.emit();
-        let stage = "backfill";
-        if (live) stage = "batch";
-        metrics.recordError(this.chain, stage);
+        metrics.recordError(this.chain, live ? "batch" : "backfill");
         throw err;
       }
       const ms = performance.now() - started;
@@ -610,23 +605,14 @@ function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: numbe
   return { finality: 20, pollInterval: 2_000, maxBlockRange: 100_000 };
 }
 
-type Seed = { address: string; chain?: string; fromBlock?: number };
-function seedSpec(item: string | Seed): Seed {
-  if (typeof item === "string") return { address: item };
-  return item;
-}
-
-function modeLabel(live: boolean): string {
-  if (live) return "live";
-  return "backfill";
-}
-
 function describeEvent(e: DispatchEvent): Record<string, unknown> {
-  const p = e.payload as any;
-  if (p.log) return { block: e.block, tx: p.log.transactionHash, logIndex: p.log.logIndex, address: p.address };
-  if (p.transaction) return { block: e.block, tx: p.transaction.hash ?? p.transaction.signature, address: p.address };
-  if (p.tx) return { block: e.block, txid: p.tx.txid, address: p.address };
-  return { block: e.block };
+  const p = e.payload;
+  if ("log" in p) return { block: e.block, tx: p.log.transactionHash, logIndex: p.log.logIndex, address: p.address };
+  if ("transaction" in p) {
+    const tx = p.transaction;
+    return { block: e.block, tx: "hash" in tx ? tx.hash : tx.signature, address: p.address };
+  }
+  return { block: e.block, txid: p.tx.txid, address: p.address };
 }
 
 function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {

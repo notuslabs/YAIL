@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseAbi } from "viem";
 import { t, table, materializedView, tableDdl, materializedViewDdl, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
@@ -10,6 +10,8 @@ import { compileFilter, logMatchesFilter, padAddress } from "../src/indexer/even
 import { fixtureSource, matchesLogFilters } from "../src/sources/fixture.js";
 import { hashQuery } from "../src/sources/cached.js";
 import type { Db } from "../src/db/client.js";
+import { CacheRunner } from "../src/cache/cached.js";
+import { memory } from "../src/cache/stores.js";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)", "event Approval(address indexed owner, address indexed spender, uint256 value)"]);
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -28,6 +30,38 @@ const ledger = table(
   },
   { orderBy: ["wallet", "chain", "txHash", "logIndex"], partitionBy: "toYYYYMM(block_time)", scopes: { wallet: "wallet" } },
 );
+
+describe("cache failures", () => {
+  it.each(["sync", "async"])("allows a retry after a %s handler failure", async (mode) => {
+    const cache = new CacheRunner(memory(), "base");
+    const error = new Error("lookup failed");
+    const handler = vi.fn(() => {
+      if (mode === "sync") throw error;
+      return Promise.reject(error);
+    });
+    const results = await Promise.allSettled([
+      cache.run({ key: "token", handler }),
+      cache.run({ key: "token", handler }),
+    ]);
+    expect(results).toEqual([
+      { status: "rejected", reason: error },
+      { status: "rejected", reason: error },
+    ]);
+    expect(handler).toHaveBeenCalledTimes(1);
+    await expect(cache.run({ key: "token", handler: async () => "USDC" })).resolves.toBe("USDC");
+  });
+
+  it("allows a retry when the store fails to save an answer", async () => {
+    const store = memory();
+    vi.spyOn(store, "set").mockRejectedValueOnce(new Error("store unavailable"));
+    const cache = new CacheRunner(store, "base");
+    const handler = vi.fn(async () => "USDC");
+    await expect(cache.run({ key: "token", handler })).rejects.toThrow("store unavailable");
+    await expect(cache.run({ key: "token", handler })).resolves.toBe("USDC");
+    await expect(cache.run({ key: "token", handler })).resolves.toBe("USDC");
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("schema", () => {
   it("renders DDL with meta columns and Replacing engine", () => {

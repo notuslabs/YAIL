@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseAbi } from "viem";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -97,6 +97,38 @@ async function balances(indexer: ReturnType<typeof makeIndexer>["indexer"]) {
   const rows = await indexer.db.query<{ wallet: string; total: string; n: string }>(sql`SELECT wallet, sum(delta) AS total, count() AS n FROM ${ledger} FINAL GROUP BY wallet ORDER BY wallet`);
   return Object.fromEntries(rows.map((r) => [r.wallet, { total: BigInt(r.total), n: Number(r.n) }]));
 }
+
+it("resolves latest once per referenced chain, honoring per-chain overrides", async () => {
+  const source = fixtureSource(buildFixture());
+  Object.assign(source, { self: source });
+  const getHeight = vi.spyOn(source, "getHeight");
+  const idle = fixtureSource(buildFixture());
+  const idleHeight = vi.spyOn(idle, "getHeight").mockRejectedValue(new Error("unavailable"));
+  const config = createConfig({
+    database: ch.database(),
+    chains: { test: { id: 1337, source }, idle: { id: 1338, source: idle } },
+    contracts: { Token: { abi: erc20, address: TOKEN, chain: { test: { startBlock: "latest" }, idle: { startBlock: 10 } } } },
+    accounts: { Wallets: { address: W1, startBlock: "latest", chain: { test: {}, idle: { startBlock: 5 } } } },
+    server: { port: false },
+    observability: { pretty: false },
+  });
+  const indexer = createIndexer({ config, schema: {} });
+  indexer.on("Token:Transfer", () => {});
+  indexer.on("Wallets:transaction", () => {});
+  try {
+    await Promise.all([indexer.init(), indexer.init()]);
+    expect(getHeight).toHaveBeenCalledTimes(1);
+    expect(idleHeight).not.toHaveBeenCalled();
+    const test = indexer.internals.plans.get("test")!;
+    expect(test.contracts[0]!.startBlock).toBe(120);
+    expect(test.accounts[0]!.startBlock).toBe(120);
+    const idlePlan = indexer.internals.plans.get("idle")!;
+    expect(idlePlan.contracts[0]!.startBlock).toBe(10);
+    expect(idlePlan.accounts[0]!.startBlock).toBe(5);
+  } finally {
+    await indexer.db.close();
+  }
+});
 
 describe("activity accounts", () => {
   const ROUTER = addr(0x500);

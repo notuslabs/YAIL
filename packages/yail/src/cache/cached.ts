@@ -36,12 +36,14 @@ export class CacheRunner {
     if (cached !== undefined) return JSON.parse(cached) as O;
     let pending = this.inflight.get(full) as Promise<O> | undefined;
     if (!pending) {
-      pending = handler().then(async (result) => {
-        await this.store.set(full, canonical(result));
-        return result;
-      });
+      pending = Promise.resolve()
+        .then(handler)
+        .then(async (result) => {
+          await this.store.set(full, canonical(result));
+          return result;
+        })
+        .finally(() => this.inflight.delete(full));
       this.inflight.set(full, pending);
-      pending.finally(() => this.inflight.delete(full));
     }
     return pending;
   }

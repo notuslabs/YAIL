@@ -1,5 +1,7 @@
 import { AddressRegistry, type AddressRow } from "../addresses/registry.js";
 import type { Config } from "../config/types.js";
+import { perChain } from "../config/chain-ref.js";
+import type { Abi } from "viem";
 import { createDb, type Db } from "../db/client.js";
 import { collectSchema, migrate, type MigrateOptions, type SchemaModule } from "../db/migrate.js";
 import { createHttpClient, type HttpClient } from "../http/client.js";
@@ -14,6 +16,7 @@ import { JobRunner, type JobRow } from "./jobs.js";
 import { buildPlans, type ChainPlan } from "./plan.js";
 import { ChainRunner, type Handler } from "./runtime.js";
 import { toArray } from "../util.js";
+import type { ChainStats } from "../observability/metrics.js";
 
 export interface IndexerOptions<C extends Config<any, any, any>> {
   config: C;
@@ -26,7 +29,7 @@ export interface IndexerOptions<C extends Config<any, any, any>> {
 }
 
 export interface StatusSnapshot {
-  chains: Record<string, { cursor: number; head: number; finalized: number; lagBlocks: number; caughtUp: boolean; running: boolean; error?: string; pendingJobs: number; blocksIndexed: number; eventsProcessed: number; batches: number; errors: number; lastBatchMs: number; lastBatchAt?: string }>;
+  chains: Record<string, ChainStats & { running: boolean; error?: string; pendingJobs: number }>;
   addresses: Array<{ set: string; chain: string; status: string; count: number }>;
   counters: Record<string, number>;
 }
@@ -71,7 +74,7 @@ export interface Indexer<C extends Config<any, any, any>> {
 }
 
 export function createIndexer<C extends Config<any, any, any>>(options: IndexerOptions<C>): Indexer<C> {
-  const { config } = options;
+  const config: Config = options.config;
   const handlers = new Map<string, Handler[]>();
   const plans = new Map<string, ChainPlan>();
   const runners = new Map<string, ChainRunner>();
@@ -84,9 +87,9 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
   let serverHandle: { close(): Promise<void> } | undefined;
 
   const { tables } = collectSchema(options.schema);
-  const contracts: Record<string, { abi: any; address?: string }> = {};
-  for (const [name, c] of Object.entries((config.contracts ?? {}) as Record<string, any>)) {
-    const entry: { abi: any; address?: string } = { abi: c.abi };
+  const contracts: Record<string, { abi: Abi; address?: string }> = {};
+  for (const [name, c] of Object.entries(config.contracts ?? {})) {
+    const entry: { abi: Abi; address?: string } = { abi: c.abi };
     if (typeof c.address === "string") entry.address = c.address.toLowerCase();
     contracts[name] = entry;
   }
@@ -111,26 +114,26 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
     // Resolve "latest" start blocks once.
     const latest = new Map<string, number>();
-    const usesLatest = JSON.stringify(config, configReplacer).includes('"latest"');
-    if (usesLatest) {
-      for (const [name, chain] of Object.entries(config.chains as Record<string, any>)) latest.set(name, await chain.source.getHeight());
+    for (const source of [...Object.values(config.contracts ?? {}), ...Object.values(config.accounts ?? {})]) {
+      for (const [chain, override] of Object.entries(perChain(source.chain))) {
+        if ((override.startBlock ?? source.startBlock) !== "latest" || latest.has(chain)) continue;
+        latest.set(chain, await config.chains[chain]!.source.getHeight());
+      }
     }
     const handled = new Set(handlers.keys());
     for (const [name, plan] of buildPlans(config, { handled, resolveLatest: (chain) => latest.get(chain)! })) plans.set(name, plan);
 
     if (config.cache?.source) {
       for (const plan of plans.values()) {
-        const runnerRef: { current?: ChainRunner } = {};
         plan.config = {
           ...plan.config,
           source: cached(plan.config.source, {
             db,
             chain: plan.chain,
-            finalizedHeight: () => runnerRef.current?.finalized,
+            finalizedHeight: () => runners.get(plan.chain)?.finalized,
             onEvent: (e) => e.type !== "store" && obs!.metrics.recordCache("source", e.type === "hit"),
-          }) as any,
+          }),
         };
-        (plan as any).__runnerRef = runnerRef;
       }
     }
 
@@ -157,7 +160,6 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
         },
         plan,
       );
-      (plan as any).__runnerRef && ((plan as any).__runnerRef.current = runner);
       runners.set(plan.chain, runner);
       jobRunners.set(plan.chain, new JobRunner({ db, registry, obs, tables, concurrency: config.indexing?.jobConcurrency ?? 2 }, runner));
     }
@@ -167,7 +169,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
   }
 
   const indexer: Indexer<C> = {
-    config,
+    config: options.config,
     schema: options.schema,
     get db() {
       return need(db, "db");
@@ -178,7 +180,14 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     get http() {
       return need(http, "http");
     },
-    internals: { plans, runners, jobs: jobRunners, registry: undefined as unknown as AddressRegistry },
+    internals: {
+      plans,
+      runners,
+      jobs: jobRunners,
+      get registry() {
+        return need(registry, "addresses");
+      },
+    },
     on(name, handler) {
       const list = handlers.get(name) ?? [];
       list.push(handler as Handler);
@@ -186,9 +195,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
       return indexer;
     },
     async init() {
-      initPromise ??= doInit().then(() => {
-        (indexer.internals as any).registry = registry;
-      });
+      initPromise ??= doInit();
       await initPromise;
     },
     async migrate(migrateOptions) {
@@ -275,16 +282,10 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
         const s = snap.chains[name] ?? { cursor: r.cursor, head: r.head, finalized: r.finalized, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, lastBatchMs: 0, caughtUp: r.caughtUp };
         chains[name] = { ...s, cursor: r.cursor, head: r.head, finalized: r.finalized, caughtUp: r.caughtUp, running: r.running, error: r.error?.message, pendingJobs: jobRunners.get(name)?.pending ?? 0 };
       }
-      return { chains, addresses: await need(registry, "addresses").counts(), counters: snap.counters as any };
+      return { chains, addresses: await need(registry, "addresses").counts(), counters: snap.counters };
     },
   };
   return indexer;
-}
-
-function configReplacer(_key: string, value: unknown): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (typeof value === "function") return undefined;
-  return value;
 }
 
 export { isAddressSet, isFactory };

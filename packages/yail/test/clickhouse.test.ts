@@ -8,6 +8,10 @@ import { BatchWriter } from "../src/db/batch.js";
 import { CacheRunner, seedCache } from "../src/cache/cached.js";
 import { memory } from "../src/cache/stores.js";
 import { createHttpClient } from "../src/http/client.js";
+import { cached } from "../src/sources/cached.js";
+import { fixtureSource, readFixture } from "../src/sources/fixture.js";
+import { walletOf } from "../src/sources/solana/shared.js";
+import type { Source } from "../src/sources/types.js";
 
 const events = table(
   "events",
@@ -32,6 +36,50 @@ afterAll(async () => {
 });
 
 describe("clickhouse", () => {
+  it.each(["base-univ3-weth-usdc", "bitcoin-wallets", "solana-wallet-hypersync"])("replays a shorter range from cached %s data", async (name) => {
+    const fixture = readFixture(new URL(`./fixtures/${name}.json`, import.meta.url).pathname);
+    const options = { blocksPerBatch: fixture.toBlock - fixture.fromBlock };
+    const fromBlock = Math.max(fixture.fromBlock, fixture.kind === "solana" ? fixture.firstBlock ?? 0 : 0);
+    let inner: Source;
+    let addresses: string[] = [];
+    let heights: number[];
+    switch (fixture.kind) {
+      case "evm":
+        inner = fixtureSource(fixture, options);
+        heights = fixture.logs.map((l) => l.blockNumber);
+        break;
+      case "bitcoin":
+        inner = fixtureSource(fixture, options);
+        heights = fixture.transactions.map((t) => t.blockHeight);
+        addresses = fixture.transactions
+          .flatMap((t) => [...t.vin.map((i) => i.prevout?.address), ...t.vout.map((o) => o.address)])
+          .filter((a): a is string => !!a);
+        break;
+      case "solana":
+        inner = fixtureSource(fixture, options);
+        addresses = fixture.balances.map(walletOf);
+        heights = fixture.transactions.map((t) => t.slot);
+        break;
+    }
+    const query = { fromBlock, toBlock: fixture.toBlock, addresses: [...new Set(addresses)], logs: [{}], transactions: [], includeLogTransactions: true };
+    const events: string[] = [];
+    const source = cached(inner, { db, chain: name, onEvent: (e) => events.push(e.type) });
+    const read = async (source: Source, toBlock: number) => {
+      const batches = [];
+      for await (const batch of source.fetch({ ...query, toBlock })) batches.push(batch);
+      return batches;
+    };
+    await read(source, fixture.toBlock);
+    events.length = 0;
+    const available = heights.filter((h) => h >= fromBlock);
+    const end = Math.floor((Math.min(...available) + Math.max(...available)) / 2);
+    const expected = await read(inner, end);
+    const batch = expected[0]!;
+    expect("logs" in batch ? batch.logs.length : batch.transactions.length).toBeGreaterThan(0);
+    expect(await read(source, end)).toEqual(expected);
+    expect(events).toEqual(["hit"]);
+  });
+
   it("migrates, inserts and reads typed rows (with dedup on re-insert)", async () => {
     const at = new Date("2026-03-01T10:00:00.123Z");
     await db.insert(events).values([

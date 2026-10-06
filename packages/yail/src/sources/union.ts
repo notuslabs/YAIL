@@ -1,4 +1,4 @@
-import type { EvmBlock, EvmSource, FetchOptions, RangeBatch, RangeQuery, Source } from "./types.js";
+import type { BatchOf, EvmBlock, FetchOptions, QueryOf, Source } from "./types.js";
 
 /** History floors move (Solana HyperSync keeps backfilling), so they are read again this often. */
 const FLOOR_TTL_MS = 60 * 60 * 1000;
@@ -38,28 +38,32 @@ export function union<S extends Source>(...sources: [S, ...S[]]): S {
     return { source: sources[i]!, end: Math.min(toBlock, ...starts.slice(0, i)) };
   }
 
-  const wrapped: Record<string, unknown> = {
+  const wrapped = {
     kind,
     name: `union(${sources.map((s) => s.name).join(", ")})`,
     getHeight: () => sources[0].getHeight(),
     async firstBlock() {
       return Math.min(...(await firstBlocks()));
     },
-    async *fetch(query: RangeQuery, options?: FetchOptions): AsyncIterable<RangeBatch> {
+    async *fetch(query: QueryOf<S>, options?: FetchOptions): AsyncIterable<BatchOf<S>> {
       const starts = await firstBlocks();
       let from = query.fromBlock;
       while (from < query.toBlock) {
         const { source, end } = route(starts, from, query.toBlock);
-        yield* (source as EvmSource).fetch({ ...(query as any), fromBlock: from, toBlock: end }, options) as AsyncIterable<RangeBatch>;
+        const fetch = source.fetch.bind(source) as (query: QueryOf<S>, options?: FetchOptions) => AsyncIterable<BatchOf<S>>;
+        yield* fetch({ ...query, fromBlock: from, toBlock: end }, options);
         from = end;
       }
     },
   };
   if (kind === "evm") {
-    wrapped.getBlock = async (number: number): Promise<EvmBlock | null> => {
-      const { source } = route(await firstBlocks(), number, number + 1);
-      return (source as EvmSource).getBlock?.(number) ?? null;
-    };
+    return {
+      ...wrapped,
+      async getBlock(number: number): Promise<EvmBlock | null> {
+        const { source } = route(await firstBlocks(), number, number + 1);
+        return source.kind === "evm" ? source.getBlock?.(number) ?? null : null;
+      },
+    } as S;
   }
-  return wrapped as unknown as S;
+  return wrapped as S;
 }
