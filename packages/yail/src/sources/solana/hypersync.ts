@@ -1,6 +1,6 @@
 import type { FetchOptions, SolanaBalance, SolanaBatch, SolanaQuery, SolanaSource } from "../types.js";
-import { chunkList } from "../../util.js";
-import { finishBatch, request, sleep, solanaBalance } from "./shared.js";
+import { chunkList, request, sleep } from "../../util.js";
+import { finishBatch, solanaBalance } from "./shared.js";
 
 export interface SolanaHypersyncOptions {
   kind: "solana";

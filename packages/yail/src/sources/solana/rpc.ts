@@ -1,5 +1,6 @@
 import type { FetchOptions, SolanaBalance, SolanaBatch, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction } from "../types.js";
-import { finishBatch, request, solanaBalance } from "./shared.js";
+import { mapLimit, request } from "../../util.js";
+import { finishBatch, solanaBalance, walletOf } from "./shared.js";
 
 export interface SolanaRpcOptions {
   kind: "solana";
@@ -12,7 +13,8 @@ export interface SolanaRpcOptions {
   fetch?: typeof fetch;
 }
 
-const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
+/** Programs whose accounts hold tokens: SPL Token and Token-2022. */
+export const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
 
 interface RawTokenBalance {
   accountIndex: number;
@@ -24,6 +26,7 @@ interface RawTokenBalance {
 interface RawTransaction {
   slot: number;
   blockTime: number | null;
+  /** Position in the slot. Mainnet's `getTransaction` returns it (2026-10) but it is not documented: read from `getBlock` when absent. */
   transactionIndex?: number;
   transaction: { signatures: string[]; message: { accountKeys: string[] } };
   meta: {
@@ -42,14 +45,17 @@ interface RawTransaction {
  * account it owns, then `getTransaction` for each signature. Cost grows with the wallets' transactions, not with
  * the slot range, so it suits old history of a few wallets: put it after `hypersync({ kind: "solana" })` in `union()`.
  *
- * Token accounts come from `getTokenAccountsByOwner` (the open ones) and from the wallets' own transactions (closed
- * ones show up where the wallet created or closed them). Transfers into a token account need it: they do not name
- * the wallet, so the wallet's own signatures miss them.
+ * Transfers into a token account do not name its wallet, so the token accounts' own signatures are read too. Open
+ * ones come from `getTokenAccountsByOwner`. A closed one shows up in the transaction that closed it, which needs the
+ * owner's signature: the wallet's transactions from the range's start up to the head name every account that existed
+ * in the range. Those past the range are read only for that, and remembered.
  */
 export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
   const doFetch = options.fetch ?? fetch;
   const concurrency = options.concurrency ?? 4;
   let id = 0;
+  /** Token accounts (account, owner) seen in each transaction read so far, for closed-account discovery. */
+  const tokenAccountsIn = new Map<string, Array<[string, string]>>();
 
   async function call<T>(method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
     const init = { method: "POST", headers: { "Content-Type": "application/json", ...options.headers }, body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }), signal };
@@ -64,15 +70,32 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
   }
 
   /** Signatures mentioning `account` in [from, to), newest first in pages of 1000. */
-  async function signatures(account: string, from: number, to: number, signal?: AbortSignal): Promise<string[]> {
-    const out: string[] = [];
+  async function signatures(account: string, from: number, to: number, signal?: AbortSignal): Promise<Array<{ signature: string; slot: number }>> {
+    const out: Array<{ signature: string; slot: number }> = [];
     let before: string | undefined;
     for (;;) {
       const page = await call<Array<{ signature: string; slot: number }>>("getSignaturesForAddress", [account, { limit: 1000, before, commitment: "confirmed" }], signal);
-      for (const s of page) if (s.slot >= from && s.slot < to) out.push(s.signature);
+      for (const s of page) if (s.slot >= from && s.slot < to) out.push({ signature: s.signature, slot: s.slot });
       if (page.length < 1000 || page.at(-1)!.slot < from) return out;
       before = page.at(-1)!.signature;
     }
+  }
+
+  async function getTransaction(signature: string, signal?: AbortSignal): Promise<RawTransaction> {
+    const raw = await call<RawTransaction>("getTransaction", [signature, { encoding: "json", maxSupportedTransactionVersion: 1, commitment: "confirmed" }], signal);
+    const keys = accountKeys(raw);
+    tokenAccountsIn.set(signature, [...(raw.meta.preTokenBalances ?? []), ...(raw.meta.postTokenBalances ?? [])].filter((t) => t.owner).map((t) => [keys[t.accountIndex]!, t.owner!]));
+    return raw;
+  }
+
+  /** Fill `transactionIndex` where the provider left it out: one `getBlock` (signatures only) per such slot. */
+  async function orderInSlots(raws: RawTransaction[], signal?: AbortSignal): Promise<void> {
+    const slots = [...new Set(raws.filter((r) => r.transactionIndex === undefined).map((r) => r.slot))];
+    const blocks = await mapLimit(slots, concurrency, (slot) =>
+      call<{ signatures: string[] }>("getBlock", [slot, { transactionDetails: "signatures", rewards: false, maxSupportedTransactionVersion: 1, commitment: "confirmed" }], signal),
+    );
+    const index = new Map(blocks.flatMap((b) => b.signatures.map((sig, i) => [sig, i] as const)));
+    for (const raw of raws) raw.transactionIndex ??= index.get(raw.transaction.signatures[0]!);
   }
 
   async function tokenAccounts(owner: string, signal?: AbortSignal): Promise<string[]> {
@@ -93,32 +116,33 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
     async *fetch(query: SolanaQuery, fetchOptions?: FetchOptions) {
       const signal = fetchOptions?.signal;
       const wallets = new Set(query.addresses);
+      const inRange = (slot: number) => slot >= query.fromBlock && slot < query.toBlock;
+      const txs = new Map<string, RawTransaction>();
       /** Token account -> owning wallet. */
       const owners = new Map<string, string>();
       for (const [wallet, accounts] of await mapLimit([...wallets], concurrency, async (w) => [w, await tokenAccounts(w, signal)] as const)) {
         for (const a of accounts) owners.set(a, wallet);
       }
-      const txs = new Map<string, RawTransaction>();
-      let accounts = [...wallets, ...owners.keys()];
-      while (accounts.length > 0) {
-        const found = (await mapLimit(accounts, concurrency, (a) => signatures(a, query.fromBlock, query.toBlock, signal))).flat();
-        const fresh = [...new Set(found)].filter((s) => !txs.has(s));
-        const raws = await mapLimit(fresh, concurrency, (s) => call<RawTransaction>("getTransaction", [s, { encoding: "json", maxSupportedTransactionVersion: 1, commitment: "confirmed" }], signal));
-        // Token accounts the wallets owned in these transactions but no longer hold (closed) were not listed yet.
-        accounts = [];
-        for (const raw of raws) {
-          txs.set(raw.transaction.signatures[0]!, raw);
-          for (const t of [...(raw.meta.preTokenBalances ?? []), ...(raw.meta.postTokenBalances ?? [])]) {
-            const account = accountKeys(raw)[t.accountIndex]!;
-            if (!t.owner || !wallets.has(t.owner) || owners.has(account)) continue;
-            owners.set(account, t.owner);
-            accounts.push(account);
-          }
-        }
+      const own = unique((await mapLimit([...wallets], concurrency, (w) => signatures(w, query.fromBlock, Infinity, signal))).flat());
+      await mapLimit(own, concurrency, async ({ signature, slot }) => {
+        if (!inRange(slot) && tokenAccountsIn.has(signature)) return;
+        const raw = await getTransaction(signature, signal);
+        if (inRange(slot)) txs.set(signature, raw);
+      });
+      for (const { signature } of own) {
+        for (const [account, owner] of tokenAccountsIn.get(signature) ?? []) if (wallets.has(owner)) owners.set(account, owner);
       }
+      const received = unique((await mapLimit([...owners.keys()], concurrency, (a) => signatures(a, query.fromBlock, query.toBlock, signal))).flat());
+      const fresh = received.filter((s) => !txs.has(s.signature));
+      for (const raw of await mapLimit(fresh, concurrency, (s) => getTransaction(s.signature, signal))) txs.set(raw.transaction.signatures[0]!, raw);
+      await orderInSlots([...txs.values()], signal);
       yield finishBatch(toBatch([...txs.values()], wallets, owners, query));
     },
   };
+}
+
+function unique(list: Array<{ signature: string; slot: number }>): Array<{ signature: string; slot: number }> {
+  return [...new Map(list.map((s) => [s.signature, s])).values()];
 }
 
 function accountKeys(raw: RawTransaction): string[] {
@@ -132,7 +156,7 @@ function toBatch(raws: RawTransaction[], wallets: Set<string>, owners: Map<strin
   const balances: SolanaBalance[] = [];
   for (const raw of raws) {
     const keys = accountKeys(raw);
-    const tx: SolanaTransaction = { signature: raw.transaction.signatures[0]!, slot: raw.slot, transactionIndex: raw.transactionIndex ?? 0, feePayer: keys[0]!, fee: BigInt(raw.meta.fee), success: raw.meta.err === null };
+    const tx: SolanaTransaction = { signature: raw.transaction.signatures[0]!, slot: raw.slot, transactionIndex: raw.transactionIndex!, feePayer: keys[0]!, fee: BigInt(raw.meta.fee), success: raw.meta.err === null };
     transactions.push(tx);
     blocks.set(raw.slot, { slot: raw.slot, time: raw.blockTime ?? 0 });
     const pre = new Map((raw.meta.preTokenBalances ?? []).map((t) => [t.accountIndex, t]));
@@ -140,25 +164,10 @@ function toBatch(raws: RawTransaction[], wallets: Set<string>, owners: Map<strin
     keys.forEach((account, i) => {
       const token = post.get(i) ?? pre.get(i);
       const owner = token?.owner ?? owners.get(account) ?? "";
-      if (!wallets.has(account) && !(token && wallets.has(owner))) return;
       const tokens = token && { mint: token.mint, owner, decimals: token.uiTokenAmount.decimals, pre: BigInt(pre.get(i)?.uiTokenAmount.amount ?? 0), post: BigInt(post.get(i)?.uiTokenAmount.amount ?? 0) };
-      balances.push(solanaBalance({ signature: tx.signature, slot: tx.slot, transactionIndex: tx.transactionIndex, account }, BigInt(raw.meta.preBalances[i]!), BigInt(raw.meta.postBalances[i]!), tokens));
+      const row = solanaBalance({ signature: tx.signature, slot: tx.slot, transactionIndex: tx.transactionIndex, account }, BigInt(raw.meta.preBalances[i]!), BigInt(raw.meta.postBalances[i]!), tokens);
+      if (wallets.has(walletOf(row))) balances.push(row);
     });
   }
   return { fromBlock: query.fromBlock, nextBlock: query.toBlock, blocks: [...blocks.values()], transactions, balances };
-}
-
-/** `fn` over `items`, at most `limit` at a time, results in input order. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) {
-        const i = next++;
-        out[i] = await fn(items[i]!);
-      }
-    }),
-  );
-  return out;
 }

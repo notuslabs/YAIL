@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db/client.js";
 import { sql } from "../db/sql.js";
 import { sourceCache } from "../db/internal.js";
+import { normalizeHex } from "../util.js";
 import type { BitcoinSource, EvmSource, FetchOptions, RangeBatch, RangeQuery, Source } from "./types.js";
 
 export interface CachedSourceOptions {
@@ -88,17 +89,11 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
 export function hashQuery(query: RangeQuery): string {
   const { fromBlock: _f, toBlock: _t, ...shape } = query as unknown as Record<string, unknown>;
   const json = JSON.stringify(shape, (_k, v) => {
-    if (typeof v === "string") return hexLower(v);
-    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map(hexLower).sort();
+    if (typeof v === "string") return normalizeHex(v);
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return [...v].map(normalizeHex).sort();
     return v;
   });
   return createHash("sha256").update(json).digest("hex").slice(0, 32);
-}
-
-/** Hex is case-insensitive; base58 addresses (Solana, legacy Bitcoin) are not. */
-function hexLower(s: string): string {
-  if (s.startsWith("0x")) return s.toLowerCase();
-  return s;
 }
 
 export function serializeBatch(batch: unknown): string {

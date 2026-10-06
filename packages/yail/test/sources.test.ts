@@ -154,6 +154,76 @@ describe("sources by provider", () => {
   });
 });
 
+describe("rpc({ kind: \"solana\" })", () => {
+  const W = "Wallet1111111111111111111111111111111111111";
+  const A = "TokenAcc111111111111111111111111111111111111";
+  /** A JSON-RPC node holding `txs`. `getTransaction` leaves `transactionIndex` out, like an undocumented field may be. */
+  function node(txs: Array<{ signature: string; slot: number; keys: string[]; tokens: Array<[number, bigint, bigint]>; lamports?: Array<[bigint, bigint]> }>, blockOrder: Record<number, string[]>) {
+    const calls: Array<[string, unknown]> = [];
+    const fake = (async (_url: string, init?: RequestInit) => {
+      const { method, params } = JSON.parse(String(init!.body));
+      calls.push([method, params[0]]);
+      const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      if (method === "getTokenAccountsByOwner") return reply({ value: [] }); // A is closed
+      if (method === "getSignaturesForAddress") {
+        const [account, { before }] = params;
+        const mine = txs.filter((t) => t.keys.includes(account)).sort((a, b) => b.slot - a.slot);
+        return reply(before ? [] : mine.map((t) => ({ signature: t.signature, slot: t.slot })));
+      }
+      if (method === "getBlock") return reply({ signatures: blockOrder[params[0]] });
+      const t = txs.find((x) => x.signature === params[0])!;
+      const balances = (pick: 1 | 2) => t.tokens.map(([i, pre, post]) => ({ accountIndex: i, mint: "M", owner: W, uiTokenAmount: { amount: String(pick === 1 ? pre : post), decimals: 6 } }));
+      return reply({
+        slot: t.slot,
+        blockTime: 1,
+        transaction: { signatures: [t.signature], message: { accountKeys: t.keys } },
+        meta: { err: null, fee: 5000, preBalances: t.keys.map((_, i) => Number(t.lamports?.[i]?.[0] ?? 0n)), postBalances: t.keys.map((_, i) => Number(t.lamports?.[i]?.[1] ?? 0n)), preTokenBalances: balances(1), postTokenBalances: balances(2) },
+      });
+    }) as typeof fetch;
+    return { fake, calls };
+  }
+
+  it("finds a token account the wallet closed after the range, and remembers what it read", async () => {
+    // A is created by the wallet at slot 10, receives a transfer naming only A at 20, is closed by the wallet at 30.
+    const { fake, calls } = node(
+      [
+        { signature: "create", slot: 10, keys: [W, A], tokens: [[1, 0n, 0n]] },
+        { signature: "transfer", slot: 20, keys: ["Sender111111111111111111111111111111111111", A], tokens: [[1, 0n, 7n]] },
+        { signature: "close", slot: 30, keys: [W, A], tokens: [[1, 7n, 0n]], lamports: [[0n, 2n], [2n, 0n]] },
+      ],
+      { 20: ["other", "transfer"] },
+    );
+    const source = rpc({ kind: "solana", url: "http://node", fetch: fake });
+    const read = async () => {
+      const out = [];
+      for await (const b of source.fetch({ fromBlock: 20, toBlock: 21, addresses: [W] })) out.push(...b.balances);
+      return out;
+    };
+    expect(await read()).toEqual([{ signature: "transfer", slot: 20, transactionIndex: 1, account: A, token: { mint: "M", owner: W, decimals: 6, pre: 0n, post: 7n } }]);
+    const closeReads = () => calls.filter(([m, p]) => m === "getTransaction" && p === "close").length;
+    expect(closeReads()).toBe(1);
+    await read();
+    expect(closeReads()).toBe(1);
+  });
+
+  it("orders transactions of one slot by the block when getTransaction has no index", async () => {
+    const { fake, calls } = node(
+      [
+        { signature: "first", slot: 5, keys: [W], tokens: [], lamports: [[10n, 9n]] },
+        { signature: "second", slot: 5, keys: [W], tokens: [], lamports: [[9n, 8n]] },
+      ],
+      { 5: ["x", "first", "y", "second"] },
+    );
+    const txs = [];
+    for await (const b of rpc({ kind: "solana", url: "http://node", fetch: fake }).fetch({ fromBlock: 0, toBlock: 10, addresses: [W] })) txs.push(...b.transactions);
+    expect(txs.map((t) => [t.signature, t.transactionIndex])).toEqual([
+      ["first", 1],
+      ["second", 3],
+    ]);
+    expect(calls.filter(([m]) => m === "getBlock")).toEqual([["getBlock", 5]]);
+  });
+});
+
 describe("Solana accounts", () => {
   const row = (account: string, extra: Partial<SolanaBalance>): SolanaBalance => ({ signature: "S", slot: 1, transactionIndex: 0, account, ...extra });
 
