@@ -189,6 +189,16 @@ describe("plan", () => {
     expect(matchesLogFilters(log, { fromBlock: 0, toBlock: 2, logs: [{ topics: [[TRANSFER], null, [padAddress("0x2222222222222222222222222222222222222222")]] }], transactions: [] })).toBe(true);
   });
 
+  it("right-pads bytesN filter values to a whole topic", () => {
+    const abi = parseAbi(["event Tagged(bytes4 indexed tag, bytes32 indexed id)"]);
+    const id = `0x${"ab".repeat(32)}`;
+    const f = compileFilter(abi, { event: "Tagged", args: { tag: "0xDEADBEEF", id } });
+    expect(f.topics).toEqual([
+      { index: 1, values: [`0xdeadbeef${"0".repeat(56)}`] },
+      { index: 2, values: [id] },
+    ]);
+  });
+
   it("hashes queries independent of range", () => {
     const a = hashQuery({ fromBlock: 1, toBlock: 2, logs: [{ address: ["0xAB"] }], transactions: [] } as any);
     const b = hashQuery({ fromBlock: 5, toBlock: 9, logs: [{ address: ["0xab"] }], transactions: [] } as any);
