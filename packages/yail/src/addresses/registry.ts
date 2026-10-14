@@ -4,7 +4,6 @@ import { sql } from "../db/sql.js";
 import type { InferRow } from "../schema/table.js";
 import { toArray } from "../util.js";
 
-/** `failed`: the address's history is incomplete (its backfill gave up), its live indexing is not. Registering it again re-runs the history. */
 export type AddressStatus = "pending" | "backfilling" | "live" | "failed";
 export type AddressRow = InferRow<typeof addressesTable>;
 
@@ -62,11 +61,11 @@ export class AddressRegistry {
     return this.get(set, chain, address) !== undefined;
   }
 
-  /** Addresses the live loop should include for a set on a chain (everything adopted). */
+  /** Addresses the live loop should include for a set on a chain: everything adopted, and failed addresses registered again (live since they were first adopted). */
   live(set: string, chain: string): string[] {
     const out: string[] = [];
     for (const r of this.rows.values()) {
-      if (r.set === set && r.chain === chain && r.adopted) out.push(r.address);
+      if (r.set === set && r.chain === chain && (r.adopted || r.adoptedAtBlock > 0n)) out.push(r.address);
     }
     return out.sort(); // deterministic order: query shapes (and cache keys) must not depend on load order
   }
@@ -100,7 +99,7 @@ export class AddressRegistry {
         status: i.status ?? "pending",
         fromBlock: BigInt(i.fromBlock ?? 0),
         adopted: i.adoptedAtBlock !== undefined,
-        adoptedAtBlock: BigInt(i.adoptedAtBlock ?? 0),
+        adoptedAtBlock: BigInt(i.adoptedAtBlock ?? existing?.adoptedAtBlock ?? 0),
         meta: i.meta ?? {},
         error: "",
         registeredAt: existing?.registeredAt ?? now,

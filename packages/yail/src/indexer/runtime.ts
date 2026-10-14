@@ -238,19 +238,23 @@ export class ChainRunner {
     await this.deps.registry.load();
   }
 
-  /** Adopt newly registered addresses at the current cursor and schedule their history. */
+  /**
+   * Adopt newly registered addresses at the current cursor and schedule their history. A failed address registered
+   * again keeps the block it was first adopted at: the live loop has indexed it since.
+   */
   private async adoptPending(): Promise<void> {
     const pending = this.deps.registry.unadopted(this.chain);
     if (pending.length === 0) return;
-    const at = this.cursor;
-    const needBackfill = pending.filter((r) => Number(r.fromBlock) < at);
-    const liveNow = pending.filter((r) => Number(r.fromBlock) >= at);
-    await this.deps.registry.updateMany(needBackfill, { adopted: true, adoptedAtBlock: BigInt(at), status: "pending" });
-    await this.deps.registry.updateMany(liveNow, { adopted: true, adoptedAtBlock: BigInt(at), status: "live" });
+    const at = BigInt(this.cursor);
+    const adopted = pending.map((r) => ({ ...r, adoptedAtBlock: r.adoptedAtBlock > 0n ? r.adoptedAtBlock : at }));
+    const needBackfill = adopted.filter((r) => r.fromBlock < r.adoptedAtBlock);
+    const liveNow = adopted.filter((r) => r.fromBlock >= r.adoptedAtBlock);
+    await this.deps.registry.updateMany(needBackfill, { adopted: true, status: "pending" });
+    await this.deps.registry.updateMany(liveNow, { adopted: true, status: "live" });
     for (const r of needBackfill) {
-      await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: at });
+      await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: Number(r.adoptedAtBlock) });
     }
-    this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: at, live: liveNow.length, backfill: needBackfill.length });
+    this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: this.cursor, live: liveNow.length, backfill: needBackfill.length });
   }
 
   /**

@@ -20,7 +20,7 @@ let shared: Promise<TestClickHouse> | undefined;
 /**
  * A ClickHouse for tests. Uses `YAIL_TEST_CLICKHOUSE_URL` when set (a running
  * server), otherwise starts a `clickhouse/clickhouse-server` container via
- * testcontainers (needs Docker). One instance is shared per process.
+ * testcontainers (needs Docker). One instance is shared per process until it is stopped.
  */
 export function startTestClickHouse(options: { image?: string } = {}): Promise<TestClickHouse> {
   shared ??= (async () => {
@@ -57,7 +57,10 @@ function make(url: string, stop: (url: string, databases: string[]) => Promise<v
       databases.push(database);
       return { url: base, database, ...config };
     },
-    stop: () => stop(base, databases),
+    stop: () => {
+      shared = undefined;
+      return stop(base, databases);
+    },
   };
 }
 

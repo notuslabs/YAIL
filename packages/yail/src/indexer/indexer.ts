@@ -125,14 +125,17 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
     if (config.cache?.source) {
       for (const plan of plans.values()) {
-        const cache: CachedSourceOptions = {
+        const cacheOptions: CachedSourceOptions = {
           db,
           chain: plan.chain,
           finalizedHeight: () => runners.get(plan.chain)?.finalized,
           onEvent: (e) => e.type !== "store" && obs!.metrics.recordCache("source", e.type === "hit"),
         };
-        plan.config = { ...plan.config, source: cached(plan.config.source, cache) };
-        if (plan.config.backfillSource) plan.config.backfillSource = cached(plan.config.backfillSource, cache);
+        plan.config = {
+          ...plan.config,
+          source: cached(plan.config.source, cacheOptions),
+          backfillSource: plan.config.backfillSource && cached(plan.config.backfillSource, cacheOptions),
+        };
       }
     }
 

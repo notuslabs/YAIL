@@ -8,7 +8,6 @@ import { INDEX_META_COLUMNS } from "../schema/table.js";
 import type { Observability } from "../observability/logger.js";
 import type { ChainRunner } from "./runtime.js";
 
-/** A failed job is retried after 30 s, then after twice the previous wait: about an hour over all attempts. */
 const MAX_JOB_ATTEMPTS = 8;
 
 export type JobRow = InferRow<typeof jobsTable>;
@@ -67,8 +66,10 @@ export class JobRunner {
 
   /** Load unfinished jobs from the database (own chain only). */
   async poll(): Promise<number> {
+    const finishedBefore = [...this.finished];
     const rows = await this.deps.db.rows(jobsTable, sql`WHERE chain = ${this.chain} AND status IN ('pending', 'running') ORDER BY created_at`);
-    const known = new Set(this.queue.map((j) => j.id));
+    for (const id of finishedBefore) this.finished.delete(id);
+    const known = new Set([...this.queue.map((j) => j.id), ...this.finished]);
     let added = 0;
     for (const r of rows) {
       if (known.has(r.id) || this.runningIds.has(r.id) || this.delayed.has(r.id)) continue;
@@ -80,6 +81,8 @@ export class JobRunner {
   }
 
   private runningIds = new Set<string>();
+  /** Jobs that finished while a poll was reading: it may have read them as unfinished. */
+  private finished = new Set<string>();
 
   start(): void {
     this.stopped = false;
@@ -115,11 +118,14 @@ export class JobRunner {
         const job = this.queue.shift()!;
         this.active++;
         this.runningIds.add(job.id);
-        void this.execute(job).finally(() => {
-          this.active--;
-          this.runningIds.delete(job.id);
-          this.wake?.();
-        });
+        void this.execute(job)
+          .catch((err) => this.deps.obs.log.warn({ event: "job_crashed", chain: this.chain, jobId: job.id, error: String(err) }))
+          .finally(() => {
+            this.active--;
+            this.runningIds.delete(job.id);
+            this.finished.add(job.id);
+            this.wake?.();
+          });
       }
       await new Promise<void>((resolve) => {
         this.wake = resolve;
@@ -148,13 +154,16 @@ export class JobRunner {
       job.status = "failed";
       if (retry) job.status = "pending";
       job.error = (err as Error).message;
-      await this.save(job);
+      await this.save(job).catch((saveErr) => obs.log.warn({ event: "job_save_failed", chain: this.chain, jobId: job.id, error: String(saveErr) }));
       if (!retry) obs.metrics.recordJob(job.kind, "failed");
       obs.metrics.recordError(this.chain, "job");
       wide.error(err as Error);
       wide.set({ outcome: job.status, attempts: job.attempts });
-      if (retry) wide.set({ retryInMs: this.retryLater(job) });
-      else if (job.kind === "backfill_address") {
+      if (retry) {
+        const retryInMs = 30_000 * 2 ** (job.attempts - 1);
+        wide.set({ retryInMs });
+        this.retryLater(job, retryInMs);
+      } else if (job.kind === "backfill_address") {
         const p = job.payload as unknown as BackfillAddressPayload;
         await this.deps.registry.update(p.set, this.chain, p.address, { status: "failed", error: job.error });
       }
@@ -182,15 +191,15 @@ export class JobRunner {
     };
   }
 
-  private retryLater(job: JobRow): number {
-    const delayMs = Math.min(3_600_000, 30_000 * 2 ** (job.attempts - 1));
+  private retryLater(job: JobRow, delayMs: number): void {
+    if (this.stopped) return;
     const timer = setTimeout(() => {
       this.delayed.delete(job.id);
       this.queue.push(job);
       this.wake?.();
     }, delayMs);
+    timer.unref();
     this.delayed.set(job.id, timer);
-    return delayMs;
   }
 
   private async backfillAddress(p: BackfillAddressPayload, onProgress?: (nextBlock: number) => Promise<void>): Promise<void> {

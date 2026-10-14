@@ -24,7 +24,7 @@ export interface HandlerDb extends Omit<Db, "insert"> {
 }
 
 export interface AddressesApi {
-  /** Is the address a member of the set on the current chain? A `failed` member is one: only its history is incomplete. */
+  /** Is the address a member of the set on the current chain, whatever its status? */
   has(set: string, address: string, chain?: string): boolean;
   /** Register an address for backfill + live indexing. Idempotent, except that a `failed` address re-runs its history. */
   register(set: string, address: string, options?: { chain?: string; fromBlock?: number; meta?: Record<string, unknown> }): Promise<AddressRow>;

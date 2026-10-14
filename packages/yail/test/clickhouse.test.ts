@@ -126,7 +126,7 @@ describe("clickhouse", () => {
     await own.close();
   });
 
-  it("drops the databases it named, views included, when stopped on a YAIL_TEST_CLICKHOUSE_URL server", async () => {
+  it("drops the databases it named, views included, when stopped on a YAIL_TEST_CLICKHOUSE_URL server, and starts afresh after", async () => {
     vi.stubEnv("YAIL_TEST_CLICKHOUSE_URL", ch.url);
     vi.resetModules();
     const testing = await import("../src/testing/index.js");
@@ -137,6 +137,9 @@ describe("clickhouse", () => {
     await migrate(scratch, { events, counts, countsMv });
     await scratch.close();
     await server.stop();
+    const next = await testing.startTestClickHouse();
+    expect(next).not.toBe(server);
+    await next.stop();
     vi.unstubAllEnvs();
     expect(await db.query(sql`SELECT name FROM system.databases WHERE name = ${scratch.database}`)).toEqual([]);
     expect(await db.query(sql`SELECT view FROM system.view_refreshes WHERE database = ${scratch.database}`)).toEqual([]);
