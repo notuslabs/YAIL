@@ -71,6 +71,17 @@ describe("account event types", () => {
     expectTypeOf<EventOf<typeof config, "SolanaWallets:transaction">>().toEqualTypeOf<SolanaAccountEvent>();
   });
 
+  it("types a non-EVM map built at runtime by its kind when merged with Object.assign", () => {
+    const solanaChains = Object.fromEntries(["solana"].map((name) => [name, { id: name, source: solana }]));
+    const config = createConfig({
+      database,
+      chains: Object.assign(solanaChains, onBitcoin({ id: "bitcoin", source: bitcoin })),
+      accounts: { SolanaWallets: { chain: "solana", address: addressSet("solanaWallets") }, BtcWallets: { chain: "bitcoin", address: addressSet("bitcoinWallets") } },
+    });
+    expectTypeOf<EventOf<typeof config, "SolanaWallets:transaction">>().toEqualTypeOf<SolanaAccountEvent>();
+    expectTypeOf<EventOf<typeof config, "BtcWallets:transaction">>().toEqualTypeOf<BitcoinAccountEvent>();
+  });
+
   it("keeps a literal config's chain names", () => {
     const config = createConfig({
       database,

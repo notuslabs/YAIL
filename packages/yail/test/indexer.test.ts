@@ -112,6 +112,31 @@ async function caughtUp(): Promise<DatabaseConfig> {
   return database;
 }
 
+/** `source` reporting a request through `onRequest` for each height it reads and each batch it yields, counted in `sent()`. */
+function counting(source: EvmSource) {
+  const listeners = requestListeners();
+  let sent = 0;
+  const send = () => {
+    sent++;
+    listeners.count();
+  };
+  const wrapped: EvmSource = {
+    ...source,
+    async getHeight() {
+      send();
+      return source.getHeight();
+    },
+    async *fetch(query, options) {
+      for await (const batch of source.fetch(query, options)) {
+        send();
+        yield batch;
+      }
+    },
+    onRequest: listeners.onRequest,
+  };
+  return { source: wrapped, sent: () => sent };
+}
+
 /** Records every fetch from `source`. `onBatch(call, batch)` runs before each batch of each fetch is handed over: it may throw, or never return. */
 function intercepted(source: EvmSource, onBatch: (call: number, batch: number) => Promise<void> | void = () => {}) {
   const queries: EvmQuery[] = [];
@@ -317,36 +342,30 @@ describe("indexer end-to-end (synthetic fixture)", () => {
 });
 
 describe("source requests", () => {
-  it("counts the source's requests in /status, per chain, until the indexer stops", async () => {
-    const fixture = fixtureSource(buildFixture(), { blocksPerBatch: 25 });
-    const listeners = requestListeners();
-    let sent = 0;
-    const send = () => {
-      sent++;
-      listeners.count();
-    };
-    const source: EvmSource = {
-      ...fixture,
-      async getHeight() {
-        send();
-        return fixture.getHeight();
-      },
-      async *fetch(query, options) {
-        for await (const batch of fixture.fetch(query, options)) {
-          send();
-          yield batch;
-        }
-      },
-      onRequest: listeners.onRequest,
-    };
-    const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture(), source });
+  it("counts a source that is also the backfillSource once in /status, per chain", async () => {
+    const counted = counting(fixtureSource(buildFixture(), { blocksPerBatch: 25 }));
+    const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture(), source: counted.source, backfillSource: counted.source });
     await indexer.run();
     const status = await indexer.status();
-    expect(sent).toBeGreaterThan(1);
-    expect(status.counters.sourceRequests).toBe(sent);
-    expect(status.chains.test?.sourceRequests).toBe(sent);
-    await source.getHeight();
-    expect((await indexer.status()).counters.sourceRequests).toBe(sent - 1);
+    expect(counted.sent()).toBeGreaterThan(1);
+    expect(status.counters.sourceRequests).toBe(counted.sent());
+    expect(status.chains.test?.sourceRequests).toBe(counted.sent());
+    await indexer.db.close();
+  });
+
+  it("counts the backfillSource's requests in /status", async () => {
+    const database = await caughtUp();
+    const fixture = buildFixture(140);
+    const live = counting(fixtureSource(fixture, { blocksPerBatch: 25 }));
+    const history = counting(fixtureSource(fixture, { blocksPerBatch: 25 }));
+    const { indexer } = makeIndexer(database, { fixture, source: live.source, backfillSource: history.source });
+    await indexer.init();
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    await indexer.run();
+    const status = await indexer.status();
+    expect(history.sent()).toBeGreaterThan(0);
+    expect(status.counters.sourceRequests).toBe(live.sent() + history.sent());
+    expect(status.chains.test?.sourceRequests).toBe(live.sent() + history.sent());
     await indexer.db.close();
   });
 });

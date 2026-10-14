@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { union } from "../src/sources/union.js";
 import { hypersync } from "../src/sources/hypersync.js";
 import { rpc } from "../src/sources/rpc.js";
@@ -393,17 +393,6 @@ describe("onRequest", () => {
     return { url: `http://127.0.0.1:${port}`, close: () => new Promise((resolve) => server.close(resolve)) };
   }
 
-  /** A listener and how many times it was called. */
-  function counter() {
-    let count = 0;
-    return {
-      listener: () => {
-        count++;
-      },
-      count: () => count,
-    };
-  }
-
   it("counts every HTTP attempt, retries included, until the listener is removed", async () => {
     const paths: string[] = [];
     const fake: typeof fetch = async (input) => {
@@ -414,15 +403,15 @@ describe("onRequest", () => {
       return new Response("[]");
     };
     const source = esplora({ url: "https://mempool.space/api", fetch: fake });
-    const seen = counter();
-    const remove = source.onRequest?.(seen.listener);
+    const listener = vi.fn();
+    const remove = source.onRequest?.(listener);
     expect(await source.getHeight()).toBe(100);
     for await (const batch of source.fetch({ fromBlock: 0, toBlock: 100, addresses: ["a", "b"] })) expect(batch.transactions).toEqual([]);
     expect(paths).toEqual(["/api/blocks/tip/height", "/api/blocks/tip/height", "/api/address/a/txs/chain", "/api/address/b/txs/chain"]);
-    expect(seen.count()).toBe(4);
+    expect(listener).toHaveBeenCalledTimes(4);
     remove?.();
     await source.getHeight();
-    expect(seen.count()).toBe(4);
+    expect(listener).toHaveBeenCalledTimes(4);
   });
 
   it("counts helius() calls and those of the rpc() it reads below slot 111,491,819", async () => {
@@ -437,11 +426,11 @@ describe("onRequest", () => {
       return reply([]);
     };
     const source = helius({ url: "https://mainnet.helius-rpc.com/?api-key=test", fetch: fake });
-    const seen = counter();
-    source.onRequest?.(seen.listener);
+    const listener = vi.fn();
+    source.onRequest?.(listener);
     for await (const batch of source.fetch({ fromBlock: 100_000_000, toBlock: 200_000_000, addresses: ["W"] })) expect(batch.balances).toEqual([]);
     expect(methods).toEqual(["getTransactionsForAddress", "getTokenAccountsByOwner", "getTokenAccountsByOwner", "getSignaturesForAddress", "getTransactionsForAddress"]);
-    expect(seen.count()).toBe(5);
+    expect(listener).toHaveBeenCalledTimes(5);
   });
 
   it("counts Solana HyperSync and Solana RPC requests through union() and cached()", async () => {
@@ -453,16 +442,16 @@ describe("onRequest", () => {
     const recent = hypersync({ kind: "solana", apiToken: "t", fetch: fake });
     const older = rpc({ kind: "solana", url: "https://solana-mainnet.g.alchemy.com/v2/key", fetch: fake });
     const source = cached(union(recent, older), { db: createDb({ url: "http://127.0.0.1:1" }), chain: "solana" });
-    const seen = counter();
-    const remove = source.onRequest?.(seen.listener);
+    const listener = vi.fn();
+    const remove = source.onRequest?.(listener);
     expect(await source.getHeight()).toBe(453_000_000);
     expect(await older.getHeight()).toBe(452_000_000);
     for await (const batch of recent.fetch({ fromBlock: 1, toBlock: 2, addresses: ["W"] })) expect(batch.nextBlock).toBe(2);
-    expect(seen.count()).toBe(3);
+    expect(listener).toHaveBeenCalledTimes(3);
     remove?.();
     await recent.getHeight();
     await older.getHeight();
-    expect(seen.count()).toBe(3);
+    expect(listener).toHaveBeenCalledTimes(3);
   });
 
   it("counts EVM HyperSync and EVM RPC requests", async () => {
@@ -472,14 +461,14 @@ describe("onRequest", () => {
       return JSON.stringify(calls.map(({ id }) => ({ jsonrpc: "2.0", id, result: "0x10" })));
     });
     try {
-      const seen = counter();
+      const listener = vi.fn();
       const evmHypersync = hypersync({ url: hypersyncServer.url, apiToken: "t" });
       const evmRpc = rpc({ url: rpcServer.url });
-      evmHypersync.onRequest?.(seen.listener);
-      evmRpc.onRequest?.(seen.listener);
+      evmHypersync.onRequest?.(listener);
+      evmRpc.onRequest?.(listener);
       expect(await evmHypersync.getHeight()).toBe(123);
       expect(await evmRpc.getHeight()).toBe(16);
-      expect(seen.count()).toBe(2);
+      expect(listener).toHaveBeenCalledTimes(2);
     } finally {
       await hypersyncServer.close();
       await rpcServer.close();

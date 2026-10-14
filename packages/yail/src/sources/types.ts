@@ -19,8 +19,9 @@ interface SourceBase {
   firstBlock?(): Promise<number>;
   /**
    * Calls `listener` before each request the source sends: every HTTP attempt, retries included (for EVM
-   * `hypersync()`, every call of its client and every response of its stream). Covers the sources it wraps. Returns
-   * the function that removes the listener. The indexer counts them in `/status` (`sourceRequests`).
+   * `hypersync()`, every call of its client and every response of its stream, but not the retries its client makes on
+   * its own). Covers the sources it wraps. Returns the function that removes the listener. The indexer counts them in
+   * `/status` (`sourceRequests`).
    */
   onRequest?(listener: () => void): () => void;
 }

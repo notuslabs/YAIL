@@ -14,7 +14,10 @@ export interface ChainStats {
   eventsProcessed: number;
   batches: number;
   errors: number;
-  /** Requests sent to the chain's sources (`source` and `backfillSource`), retries included. */
+  /**
+   * Requests sent to the chain's sources (`source` and `backfillSource`), retries included, except those the HyperSync
+   * client makes on its own (`maxNumRetries`): EVM `hypersync()` counts client calls and stream responses.
+   */
   sourceRequests: number;
   lastBatchMs: number;
   lastBatchAt?: string;
@@ -61,7 +64,7 @@ export class Metrics {
     this.cacheEvents = m.createCounter("yail.cache.events", { description: "Cache hits/misses by cache" });
     this.jobEvents = m.createCounter("yail.jobs", { description: "Backfill / reindex jobs by outcome" });
     this.sourceDuration = m.createHistogram("yail.source.duration", { description: "Time waiting on the data source per batch", unit: "ms" });
-    this.sourceRequests = m.createCounter("yail.source.requests", { description: "Requests sent to the data sources, retries included", unit: "{request}" });
+    this.sourceRequests = m.createCounter("yail.source.requests", { description: "Requests sent to the data sources, retries included, except those the HyperSync client makes on its own (maxNumRetries): EVM hypersync() counts client calls and stream responses", unit: "{request}" });
 
     m.createObservableGauge("yail.chain.head", { description: "Source head block" }).addCallback((r) => {
       for (const [chain, s] of this.chains) r.observe(s.head, { chain });

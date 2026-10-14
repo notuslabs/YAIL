@@ -16,7 +16,7 @@ import { JobRunner, type JobRow } from "./jobs.js";
 import { buildPlans, type ChainPlan } from "./plan.js";
 import { ChainRunner, type Handler } from "./runtime.js";
 import { toArray } from "../util.js";
-import type { ChainStats, Metrics } from "../observability/metrics.js";
+import type { ChainStats } from "../observability/metrics.js";
 
 export interface IndexerOptions<C extends Config<any, any, any>> {
   config: C;
@@ -85,7 +85,6 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
   let registry: AddressRegistry | undefined;
   let initPromise: Promise<void> | undefined;
   let serverHandle: { close(): Promise<void> } | undefined;
-  let stopCounting: Array<() => void> = [];
 
   const { tables } = collectSchema(options.schema);
   const contracts: Record<string, { abi: Abi; address?: string }> = {};
@@ -105,20 +104,16 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     return address;
   };
 
-  /** Count every request of each chain's sources in `metrics`, until `stop()`. */
-  function countSourceRequests(metrics: Metrics): void {
-    if (stopCounting.length > 0) return;
-    stopCounting = Object.entries(config.chains).flatMap(([name, chain]) => {
-      const listener = () => metrics.recordSourceRequest(name);
-      return [chain.source, chain.backfillSource].flatMap((source) => source?.onRequest?.(listener) ?? []);
-    });
-  }
-
   async function doInit(): Promise<void> {
     db = createDb(config.database);
     await migrate(db, options.schema);
     obs = await initObservability(config.observability, { db, dbConfig: config.database });
-    countSourceRequests(obs.metrics);
+    const { metrics } = obs;
+    for (const [name, chain] of Object.entries(config.chains)) {
+      const listener = () => metrics.recordSourceRequest(name);
+      chain.source.onRequest?.(listener);
+      chain.backfillSource?.onRequest?.(listener);
+    }
     http = createHttpClient({ db, persist: config.cache?.http !== false, fetch: options.fetch, onCache: (hit) => obs!.metrics.recordCache("http", hit) });
     registry = new AddressRegistry(db, normalize);
     await registry.load();
@@ -218,7 +213,6 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     async start(startOptions = {}) {
       await indexer.init();
       const o = need(obs, "observability");
-      countSourceRequests(o.metrics);
       for (const j of jobRunners.values()) j.start();
       if (startOptions.server !== false && config.server?.port !== false) {
         const { startServer } = await import("../server/api.js");
@@ -235,9 +229,8 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     },
     async run() {
       await indexer.init();
-      const o = need(obs, "observability");
-      countSourceRequests(o.metrics);
       for (const j of jobRunners.values()) j.start();
+      const o = need(obs, "observability");
       try {
         await Promise.all([...runners.values()].map((r) => r.runLoop({ once: true })));
         o.log.info({ event: "run_phase", phase: "chains_caught_up" });
@@ -257,8 +250,6 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
       await Promise.all([...jobRunners.values()].map((j) => j.stop()));
       await serverHandle?.close();
       serverHandle = undefined;
-      for (const remove of stopCounting) remove();
-      stopCounting = [];
     },
     addresses: {
       async register(input) {
