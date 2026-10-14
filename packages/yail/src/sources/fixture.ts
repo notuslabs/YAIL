@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { reviveBatch, serializeBatch } from "./cached.js";
 import { matchesTxFilters } from "./rpc.js";
 import { finishBatch, walletOf } from "./solana/shared.js";
-import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
+import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaInstructionFilter, SolanaLog, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
 
 export interface EvmFixture {
@@ -45,6 +45,10 @@ export interface SolanaFixture {
   blocks: SolanaBlock[];
   transactions: SolanaTransaction[];
   balances: SolanaBalance[];
+  /** Program rows. Absent in fixtures recorded before programs existed. */
+  instructions?: SolanaInstruction[];
+  logs?: SolanaLog[];
+  joinedBalances?: SolanaBalance[];
   expected?: Record<string, unknown>;
 }
 
@@ -105,12 +109,10 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
       },
       async *fetch(query: SolanaQuery) {
         if (query.fromBlock < (fixture.firstBlock ?? 0)) throw new Error(`fixture(${fixture.name}): asked for slot ${query.fromBlock}, below its first block ${fixture.firstBlock}`);
-        const wallets = new Set(query.addresses);
         let from = query.fromBlock;
         while (from < query.toBlock) {
           const to = Math.min(from + per, query.toBlock);
-          const balances = fixture.balances.filter((b) => b.slot >= from && b.slot < to && wallets.has(walletOf(b)));
-          yield finishBatch({ fromBlock: from, nextBlock: to, blocks: fixture.blocks, transactions: fixture.transactions, balances });
+          yield finishBatch(replaySolana(fixture, query, from, to));
           from = to;
         }
       },
@@ -134,6 +136,55 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
     },
   };
   return btc;
+}
+
+/**
+ * The recorded rows a Solana query matches in [from, to), with HyperSync's semantics: an instruction filter with `logs`
+ * matches only transactions where its programs also wrote such a line, and returns those lines too.
+ */
+function replaySolana(fixture: SolanaFixture, query: SolanaQuery, from: number, to: number): SolanaBatch {
+  const inRange = (row: { slot: number }) => row.slot >= from && row.slot < to;
+  const wallets = new Set(query.addresses);
+  const instructions = (fixture.instructions ?? []).filter(inRange);
+  const logs = (fixture.logs ?? []).filter(inRange);
+  const matchedInstructions = new Set<SolanaInstruction>();
+  const matchedLogs = new Set<SolanaLog>();
+  const joined = new Set<string>();
+  for (const f of query.instructions ?? []) {
+    let matched = instructions.filter((i) => instructionMatches(i, f));
+    if (f.logs.length > 0) {
+      const written = logs.filter((l) => f.programs.includes(l.program) && f.logs.includes(l.kind));
+      const wrote = new Set(written.map((l) => l.signature));
+      matched = matched.filter((i) => wrote.has(i.signature));
+      const kept = new Set(matched.map((i) => i.signature));
+      for (const l of written) if (kept.has(l.signature)) matchedLogs.add(l);
+    }
+    for (const i of matched) matchedInstructions.add(i);
+    if (f.balances) for (const i of matched) joined.add(i.signature);
+  }
+  for (const f of query.logs ?? []) {
+    for (const l of logs) {
+      if (!f.programs.includes(l.program) || !f.kinds.includes(l.kind)) continue;
+      matchedLogs.add(l);
+      if (f.balances) joined.add(l.signature);
+    }
+  }
+  return {
+    fromBlock: from,
+    nextBlock: to,
+    blocks: fixture.blocks,
+    transactions: fixture.transactions,
+    balances: fixture.balances.filter((b) => inRange(b) && wallets.has(walletOf(b))),
+    instructions: [...matchedInstructions],
+    logs: logs.filter((l) => matchedLogs.has(l)),
+    joinedBalances: (fixture.joinedBalances ?? []).filter((b) => inRange(b) && joined.has(b.signature)),
+  };
+}
+
+function instructionMatches(instruction: SolanaInstruction, filter: SolanaInstructionFilter): boolean {
+  if (!filter.programs.includes(instruction.program)) return false;
+  if (filter.isInner !== undefined && filter.isInner !== instruction.isInner) return false;
+  return filter.discriminators.length === 0 || filter.discriminators.some((d) => instruction.data.startsWith(d));
 }
 
 export function matchesLogFilters(log: EvmLog, query: EvmQuery): boolean {
@@ -176,13 +227,17 @@ export async function recordBitcoinFixture(source: BitcoinSource, query: Bitcoin
 }
 
 export async function recordSolanaFixture(source: SolanaSource, query: SolanaQuery, meta: { name?: string; expected?: Record<string, unknown> } = {}): Promise<SolanaFixture> {
-  const fx: SolanaFixture = { version: 1, kind: "solana", name: meta.name, height: await source.getHeight(), fromBlock: query.fromBlock, toBlock: query.toBlock, blocks: [], transactions: [], balances: [], expected: meta.expected };
+  const height = await source.getHeight();
+  const rows: Omit<SolanaBatch, "fromBlock" | "nextBlock"> = { blocks: [], transactions: [], balances: [], instructions: [], logs: [], joinedBalances: [] };
   for await (const batch of source.fetch(query)) {
-    fx.blocks.push(...batch.blocks);
-    fx.transactions.push(...batch.transactions);
-    fx.balances.push(...batch.balances);
+    rows.blocks.push(...batch.blocks);
+    rows.transactions.push(...batch.transactions);
+    rows.balances.push(...batch.balances);
+    rows.instructions.push(...batch.instructions);
+    rows.logs.push(...batch.logs);
+    rows.joinedBalances.push(...batch.joinedBalances);
   }
-  return fx;
+  return { version: 1, kind: "solana", name: meta.name, height, fromBlock: query.fromBlock, toBlock: query.toBlock, ...rows, expected: meta.expected };
 }
 
 export function writeFixture(path: string, fixture: Fixture): void {

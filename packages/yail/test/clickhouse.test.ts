@@ -62,7 +62,8 @@ describe("clickhouse", () => {
         heights = fixture.transactions.map((t) => t.slot);
         break;
     }
-    const query = { fromBlock, toBlock: fixture.toBlock, addresses: [...new Set(addresses)], logs: [{}], transactions: [], includeLogTransactions: true };
+    // One query for every kind: its log filter matches every EVM log and no Solana program's.
+    const query = { fromBlock, toBlock: fixture.toBlock, addresses: [...new Set(addresses)], logs: [{ programs: [], kinds: [], balances: false }], transactions: [], includeLogTransactions: true };
     const events: string[] = [];
     const source = cached(inner, { db, chain: name, onEvent: (e) => events.push(e.type) });
     const read = async (source: Source, toBlock: number) => {
@@ -76,7 +77,7 @@ describe("clickhouse", () => {
     const end = Math.floor((Math.min(...available) + Math.max(...available)) / 2);
     const expected = await read(inner, end);
     const batch = expected[0]!;
-    expect("logs" in batch ? batch.logs.length : batch.transactions.length).toBeGreaterThan(0);
+    expect(Object.values(batch).some((rows) => Array.isArray(rows) && rows.length > 0)).toBe(true);
     expect(await read(source, end)).toEqual(expected);
     expect(events).toEqual(["hit"]);
   });

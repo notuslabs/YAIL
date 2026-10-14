@@ -188,9 +188,40 @@ export interface BitcoinSource extends SourceBase {
 // ---------------------------------------------------------------- Solana
 // Blocks are slots: `fromBlock`/`toBlock`/`nextBlock` count slots.
 
+/** Instructions of Solana programs, top-level or inner (CPI), of successful transactions. */
+export interface SolanaInstructionFilter {
+  /** Program ids (OR). */
+  programs: string[];
+  /** Hex prefixes of the instruction data (OR), 1, 2, 4 or 8 bytes each. Empty = every instruction of the programs. */
+  discriminators: string[];
+  /** true = inner (CPI) instructions only, false = top-level ones only. Absent = both. */
+  isInner?: boolean;
+  /**
+   * Also the log lines of these kinds the programs wrote in each matched transaction, in the same request (HyperSync
+   * intersects the two per transaction: a transaction where the programs wrote no such line matches nothing). Empty = none.
+   */
+  logs: Array<"log" | "data">;
+  /** Also every balance change of each matched transaction (`joinedBalances`). */
+  balances: boolean;
+}
+
+/** Log lines Solana programs wrote in successful transactions. */
+export interface SolanaLogFilter {
+  /** Program ids (OR). */
+  programs: string[];
+  /** `log` for `Program log:` lines, `data` for `Program data:` lines (Anchor `emit!` events). */
+  kinds: Array<"log" | "data">;
+  /** Also every balance change of each matched transaction (`joinedBalances`). */
+  balances: boolean;
+}
+
 export interface SolanaQuery extends RangeQuery {
   /** Wallets. Each one matches its own (SOL) account and every token account it owns. */
   addresses: string[];
+  /** Program instructions. Only `hypersync({ kind: "solana" })` serves them. */
+  instructions?: SolanaInstructionFilter[];
+  /** Program log lines. Only `hypersync({ kind: "solana" })` serves them. */
+  logs?: SolanaLogFilter[];
 }
 
 export interface SolanaBlock {
@@ -225,11 +256,45 @@ export interface SolanaBalance {
   token?: { mint: string; owner: string; decimals: number; pre: bigint; post: bigint };
 }
 
+/** One instruction a successful transaction ran: a top-level one or an inner (CPI) one. */
+export interface SolanaInstruction {
+  signature: string;
+  slot: number;
+  transactionIndex: number;
+  /** Position in the transaction: `[2]` is its third top-level instruction, `[2, 0]` the first inner one that one made. */
+  address: number[];
+  program: string;
+  accounts: string[];
+  /** Hex, without `0x`. */
+  data: string;
+  isInner: boolean;
+}
+
+/** One log line a program wrote in a successful transaction. */
+export interface SolanaLog {
+  signature: string;
+  slot: number;
+  transactionIndex: number;
+  /** The instruction that wrote it. Null before slot 416,000,000: Solana HyperSync did not record it there. */
+  instructionAddress: number[] | null;
+  /** The program that wrote it, an inner (CPI) one included. */
+  program: string;
+  kind: "log" | "data";
+  /** Without the `Program log: ` / `Program data: ` prefix (a `data` line is bare base64). */
+  message: string;
+}
+
 export interface SolanaBatch extends RangeBatch {
   blocks: SolanaBlock[];
   transactions: SolanaTransaction[];
   /** Changed balances of the queried wallets' accounts only (their SOL account and the token accounts they own). */
   balances: SolanaBalance[];
+  /** By transaction, then by address. */
+  instructions: SolanaInstruction[];
+  /** By transaction, then in the order they were written. */
+  logs: SolanaLog[];
+  /** Changed balances of every account in the transactions a program filter with `balances: true` matched. */
+  joinedBalances: SolanaBalance[];
 }
 
 export interface SolanaSource extends SourceBase {

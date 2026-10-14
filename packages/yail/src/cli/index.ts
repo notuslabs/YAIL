@@ -7,7 +7,7 @@ import type { Indexer } from "../indexer/indexer.js";
 import { schemaDdl } from "../db/migrate.js";
 import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture, type Fixture } from "../sources/fixture.js";
 import { bigintReplacer } from "../util.js";
-import { buildAddressQuery, buildEvmQuery } from "../indexer/plan.js";
+import { buildAddressQuery, buildEvmQuery, buildSolanaQuery } from "../indexer/plan.js";
 
 const HELP = `yail <command> [options]
 
@@ -136,7 +136,7 @@ export async function run(argv: string[]): Promise<void> {
       if (source.kind === "evm") {
         fixture = await recordEvmFixture(source, buildEvmQuery(plan, from, to, registry), { name: values.chain, chainId: Number(plan.config.id) });
       } else if (source.kind === "solana") {
-        fixture = await recordSolanaFixture(source, buildAddressQuery(plan, from, to, registry), { name: values.chain });
+        fixture = await recordSolanaFixture(source, buildSolanaQuery(plan, from, to, registry), { name: values.chain });
       } else {
         fixture = await recordBitcoinFixture(source, buildAddressQuery(plan, from, to, registry), { name: values.chain });
       }

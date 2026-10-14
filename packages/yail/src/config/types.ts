@@ -3,6 +3,7 @@ import type { DatabaseConfig } from "../db/client.js";
 import type { Source } from "../sources/types.js";
 import type { AddressSetRef, FactoryRef } from "./address.js";
 import type { CacheStore } from "../cache/cached.js";
+import type { EventDef, InstructionDef } from "../solana/program.js";
 
 export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRef;
 
@@ -78,6 +79,37 @@ export interface AccountConfig {
   activity?: boolean;
 }
 
+export interface ChainScopedProgram {
+  address?: string | readonly string[];
+  startBlock?: BlockRef;
+  endBlock?: number;
+}
+
+/**
+ * A Solana program: the instructions it runs and the events it emits, decoded with the codecs of
+ * `@notuslabs/yail/solana`. Served by `hypersync({ kind: "solana" })` only, from the first slot it holds.
+ */
+export interface ProgramConfig<
+  instructions extends Record<string, InstructionDef<any, any>> = Record<string, InstructionDef<any, any>>,
+  events extends Record<string, EventDef<any>> = Record<string, EventDef<any>>,
+> {
+  /** Solana chain name, or a per-chain map of overrides. `{}` indexes nothing and keeps the handlers typed. */
+  chain: string | Readonly<Record<string, ChainScopedProgram>>;
+  /** Program id(s), base58. */
+  address: string | readonly string[];
+  /** At or above the first slot Solana HyperSync holds: `rpc({ kind: "solana" })` refuses program queries. */
+  startBlock?: BlockRef;
+  endBlock?: number;
+  instructions?: instructions;
+  events?: events;
+  /** Where the events are: `Program data:` log lines (`emit!`, the default) or self-CPI inner instructions (`emit_cpi!`). */
+  emit?: "log" | "cpi";
+  /** Give instruction events the program's log lines in their transaction (`event.programLogs`). */
+  includeLogs?: boolean;
+  /** Give events every SOL and token balance change of their transaction (`event.balances`). About 6.5x the data. */
+  includeBalances?: boolean;
+}
+
 export interface AddressSetConfig {
   /** Addresses to seed the set with (registered on first start, per chain that uses the set). */
   initial?: ReadonlyArray<string | { address: string; chain?: string; fromBlock?: number }>;
@@ -128,11 +160,13 @@ export interface Config<
   chains extends Record<string, ChainConfig> = Record<string, ChainConfig>,
   contracts extends Record<string, ContractConfig<any>> = Record<string, ContractConfig<any>>,
   accounts extends Record<string, AccountConfig> = Record<string, AccountConfig>,
+  programs extends Record<string, ProgramConfig<any, any>> = Record<string, ProgramConfig<any, any>>,
 > {
   database: DatabaseConfig;
   chains: chains;
   contracts?: contracts;
   accounts?: accounts;
+  programs?: programs;
   addressSets?: Record<string, AddressSetConfig>;
   cache?: CacheConfig;
   observability?: ObservabilityConfig;

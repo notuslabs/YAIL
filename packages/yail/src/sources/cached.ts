@@ -3,7 +3,7 @@ import type { Db } from "../db/client.js";
 import { sql } from "../db/sql.js";
 import { sourceCache } from "../db/internal.js";
 import { normalizeHex } from "../util.js";
-import type { BatchOf, BitcoinSource, EvmSource, FetchOptions, QueryOf, RangeQuery, Source } from "./types.js";
+import type { BatchOf, BitcoinBatch, BitcoinSource, EvmBatch, EvmSource, FetchOptions, QueryOf, RangeQuery, SolanaBatch, Source, SourceKind } from "./types.js";
 
 export interface CachedSourceOptions {
   db: Db;
@@ -50,7 +50,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
             const batch = reviveBatch(payload) as BatchOf<S>;
             const next = Math.min(batch.nextBlock, query.toBlock);
             options.onEvent?.({ type: "hit", fromBlock: cursor, nextBlock: next });
-            yield clampBatch(batch, next);
+            yield clampBatch(inner.kind, batch, next);
             cursor = next;
             continue;
           }
@@ -115,9 +115,20 @@ function untagBigint(_key: string, value: unknown): unknown {
   return value;
 }
 
-function clampBatch<B extends BatchOf<Source>>(batch: B, next: number): B {
+interface BatchByKind {
+  evm: EvmBatch;
+  bitcoin: BitcoinBatch;
+  solana: SolanaBatch;
+}
+
+/** A batch from a source of `kind` is that kind's batch. */
+function isBatchOf<K extends SourceKind>(expected: K, kind: SourceKind, _batch: BatchOf<Source>): _batch is BatchByKind[K] {
+  return kind === expected;
+}
+
+function clampBatch<B extends BatchOf<Source>>(kind: SourceKind, batch: B, next: number): B {
   if (batch.nextBlock === next) return batch;
-  if ("logs" in batch) {
+  if (isBatchOf("evm", kind, batch)) {
     return {
       ...batch,
       nextBlock: next,
@@ -127,16 +138,21 @@ function clampBatch<B extends BatchOf<Source>>(batch: B, next: number): B {
       ...(batch.traces ? { traces: batch.traces.filter((t) => t.blockNumber < next) } : {}),
     };
   }
-  if ("balances" in batch) {
+  if (isBatchOf("solana", kind, batch)) {
+    const before = (row: { slot: number }) => row.slot < next;
     return {
       ...batch,
       nextBlock: next,
-      blocks: batch.blocks.filter((b) => b.slot < next),
-      transactions: batch.transactions.filter((t) => t.slot < next),
-      balances: batch.balances.filter((b) => b.slot < next),
+      blocks: batch.blocks.filter(before),
+      transactions: batch.transactions.filter(before),
+      balances: batch.balances.filter(before),
+      instructions: batch.instructions.filter(before),
+      logs: batch.logs.filter(before),
+      joinedBalances: batch.joinedBalances.filter(before),
     };
   }
-  return { ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) };
+  if (isBatchOf("bitcoin", kind, batch)) return { ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) };
+  throw new Error(`cached(): unknown source kind "${kind}"`);
 }
 
 export type { EvmSource, BitcoinSource };

@@ -47,7 +47,7 @@ export interface ReindexRequest {
 export interface Indexer<C extends Config<any, any, any>> {
   readonly config: C;
   readonly schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>;
-  /** Register a handler. Names are `Contract:Event`, `Account:transaction`, or `setup`. */
+  /** Register a handler. Names are `Contract:Event`, `Account:transaction`, `Program:instruction`, `Program:Event`, or `setup`. */
   on<name extends EventNames<C>>(name: name, handler: (args: { event: EventOf<C, name>; context: HandlerContext<C, ChainNames<C>> }) => Promise<void> | void): Indexer<C>;
   /** Connect, migrate, and prepare runners without indexing. Idempotent. */
   init(): Promise<void>;
@@ -114,7 +114,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
     // Resolve "latest" start blocks once.
     const latest = new Map<string, number>();
-    for (const source of [...Object.values(config.contracts ?? {}), ...Object.values(config.accounts ?? {})]) {
+    for (const source of [...Object.values(config.contracts ?? {}), ...Object.values(config.accounts ?? {}), ...Object.values(config.programs ?? {})]) {
       for (const [chain, override] of Object.entries(perChain(source.chain))) {
         if ((override.startBlock ?? source.startBlock) !== "latest" || latest.has(chain)) continue;
         latest.set(chain, await config.chains[chain]!.source.getHeight());
@@ -140,8 +140,8 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     }
 
     for (const plan of plans.values()) {
-      if (plan.contracts.length + plan.accounts.length === 0) {
-        obs.log.warn("yail", `${plan.chain}: no handled contracts or accounts, chain will idle`);
+      if (plan.contracts.length + plan.accounts.length + plan.programs.length === 0) {
+        obs.log.warn("yail", `${plan.chain}: no handled contracts, accounts or programs, chain will idle`);
       }
       const runner = new ChainRunner(
         {

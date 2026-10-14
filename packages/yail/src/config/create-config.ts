@@ -1,4 +1,4 @@
-import type { AccountConfig, ChainConfig, Config, ContractConfig } from "./types.js";
+import type { AccountConfig, ChainConfig, Config, ContractConfig, ProgramConfig } from "./types.js";
 import type { AbiEvent } from "viem";
 import { isAddressSet, isFactory } from "./address.js";
 import { chainNames } from "./chain-ref.js";
@@ -13,7 +13,8 @@ export function createConfig<
   const chains extends Record<string, ChainConfig>,
   const contracts extends Record<string, ContractConfig<any>> = {},
   const accounts extends Record<string, AccountConfig> = {},
->(config: Config<chains, contracts, accounts>): Config<chains, contracts, accounts> {
+  const programs extends Record<string, ProgramConfig<any, any>> = {},
+>(config: Config<chains, contracts, accounts, programs>): Config<chains, contracts, accounts, programs> {
   validateConfig(config);
   return config;
 }
@@ -71,6 +72,30 @@ export function validateConfig(config: Config): void {
       if (evm) checkAddress(`account "${name}"`, a.address);
     }
   }
+  for (const [name, p] of Object.entries<ProgramConfig>(config.programs ?? {})) validateProgram(config, name, p);
   config.addressSets = { ...(config.addressSets ?? {}) };
   for (const s of sets) config.addressSets[s] ??= {};
+}
+
+function validateProgram(config: Config, name: string, program: ProgramConfig): void {
+  const owner = `program "${name}"`;
+  for (const chain of chainNames(program.chain)) {
+    const source = config.chains[chain]?.source;
+    if (!source) throw new Error(`${owner}: unknown chain "${chain}"`);
+    if (source.kind !== "solana") throw new Error(`${owner}: chain "${chain}" is not a Solana chain`);
+  }
+  const overrides = typeof program.chain === "string" ? [] : Object.values(program.chain);
+  for (const address of [...toArray(program.address), ...overrides.flatMap((o) => toArray(o.address ?? []))]) {
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) throw new Error(`${owner}: invalid program id "${address}"`);
+  }
+  if (program.emit !== undefined && program.emit !== "log" && program.emit !== "cpi") throw new Error(`${owner}: emit must be "log" or "cpi"`);
+  const instructions = Object.entries(program.instructions ?? {});
+  const events = Object.entries(program.events ?? {});
+  for (const [key, def] of instructions) if (def.kind !== "instruction") throw new Error(`${owner}: instructions.${key} is not an instruction() or anchorInstruction()`);
+  for (const [key, def] of events) if (def.kind !== "event") throw new Error(`${owner}: events.${key} is not an anchorEvent()`);
+  const instructionNames = new Set(instructions.map(([key]) => key));
+  for (const [key] of events) if (instructionNames.has(key)) throw new Error(`${owner}: "${key}" is both an instruction and an event`);
+  for (const [key, def] of [...instructions, ...events]) {
+    if (!/^(?:[0-9a-f]{2}|[0-9a-f]{4}|[0-9a-f]{8}|[0-9a-f]{16})$/.test(def.discriminator)) throw new Error(`${owner}: ${key} discriminator "${def.discriminator}" must be lowercase hex of 1, 2, 4 or 8 bytes`);
+  }
 }

@@ -142,6 +142,120 @@ describe("hypersync({ kind: \"solana\" })", () => {
   });
 });
 
+describe("hypersync({ kind: \"solana\" }) programs", () => {
+  const AMM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+  const CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+  const PUMP = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+
+  /** A server that answers every selection with rows for a successful and a failed transaction, and records the bodies. */
+  function server() {
+    const bodies: any[] = [];
+    const fake = (async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/height")) return new Response("1000");
+      const body = JSON.parse(String(init!.body));
+      bodies.push(body);
+      const txs = [
+        { signature: "OK", index: 0, success: true },
+        { signature: "FAILED", index: 1, success: false },
+      ];
+      const programs: string[] = [...new Set<string>((body.instruction_calls ?? []).flatMap((s: { executing_account: string[] }) => s.executing_account))];
+      const lines: Array<{ program_id: string[]; kind: string[] }> = body.logs ?? [];
+      return new Response(
+        JSON.stringify({
+          next_slot: body.to_slot,
+          blocks: [[{ slot: body.from_slot, block_time: 1 }]],
+          transactions: [txs.map((t) => ({ slot: body.from_slot, transaction_index: t.index, transaction_id: t.signature, fee_payer: "W", success: t.success, fee: 5000 }))],
+          instruction_calls: [txs.flatMap((t) => programs.map((program, n) => ({ slot: body.from_slot, transaction_index: t.index, instruction_address: [n], executing_account: program, account_arguments: [], data: "09" })))],
+          logs: [txs.flatMap((t) => lines.flatMap((l) => l.program_id.flatMap((program) => l.kind.map((kind) => ({ slot: body.from_slot, transaction_index: t.index, instruction_address: [0], program_id: program, kind, message: `${program} ${kind}` })))))],
+          account_activity: [body.field_selection.account_activity ? txs.map((t) => ({ slot: body.from_slot, transaction_index: t.index, transaction_id: t.signature, account: "W", pre_balance: 10, post_balance: 5 })) : []],
+        }),
+      );
+    }) as typeof fetch;
+    return { fake, bodies };
+  }
+
+  async function batches(source: ReturnType<typeof hypersync>, query: Parameters<ReturnType<typeof hypersync>["fetch"]>[0]) {
+    const out = [];
+    for await (const batch of source.fetch(query)) out.push(batch);
+    return out;
+  }
+
+  it("never mixes wallet, instruction and log selections in one request, but an instruction filter's own log lines", async () => {
+    const { fake, bodies } = server();
+    await batches(hypersync({ kind: "solana", apiToken: "t", fetch: fake }), {
+      fromBlock: 100,
+      toBlock: 101,
+      addresses: ["W"],
+      instructions: [
+        { programs: [AMM], discriminators: ["09", "2b04ed0b1ac91e62"], logs: ["log", "data"], balances: false },
+        { programs: [PUMP], discriminators: ["e445a52e51cb9a1d"], isInner: true, logs: [], balances: false },
+      ],
+      logs: [{ programs: [CLMM], kinds: ["data"], balances: true }],
+    });
+    const selections = bodies.map((b) => ({ instruction_calls: b.instruction_calls, logs: b.logs, account_activity: b.account_activity }));
+    expect(selections).toEqual([
+      {
+        instruction_calls: [
+          { executing_account: [AMM], tx_success: true, d1: ["09"] },
+          { executing_account: [AMM], tx_success: true, d8: ["2b04ed0b1ac91e62"] },
+        ],
+        logs: [{ program_id: [AMM], kind: ["log", "data"] }],
+      },
+      { instruction_calls: [{ executing_account: [PUMP], tx_success: true, is_inner: true, d8: ["e445a52e51cb9a1d"] }] },
+      { logs: [{ program_id: [CLMM], kind: ["data"] }] },
+      { account_activity: [{ account: ["W"] }, { owner: ["W"] }] },
+    ]);
+    expect(bodies.map((b) => Object.keys(b.field_selection).sort())).toEqual([
+      ["block", "instruction_call", "log", "transaction"],
+      ["block", "instruction_call", "transaction"],
+      ["account_activity", "block", "log", "transaction"],
+      ["account_activity", "block", "transaction"],
+    ]);
+  });
+
+  it("drops program rows of failed transactions and keeps each log line once", async () => {
+    const { fake } = server();
+    const [batch] = await batches(hypersync({ kind: "solana", apiToken: "t", fetch: fake }), {
+      fromBlock: 100,
+      toBlock: 101,
+      addresses: ["W"],
+      instructions: [{ programs: [CLMM], discriminators: [], logs: ["log", "data"], balances: true }],
+      logs: [{ programs: [CLMM], kinds: ["data"], balances: false }],
+    });
+    expect(batch!.instructions.map((i) => [i.signature, i.address, i.isInner])).toEqual([["OK", [0], false]]);
+    expect(batch!.logs.map((l) => [l.signature, l.message])).toEqual([
+      ["OK", `${CLMM} log`],
+      ["OK", `${CLMM} data`],
+    ]);
+    expect(batch!.joinedBalances.map((b) => b.signature)).toEqual(["OK"]);
+    // A failed transaction still charged its fee: the wallet's row stays.
+    expect(batch!.balances.map((b) => b.signature)).toEqual(["OK", "FAILED"]);
+    expect(batch!.transactions.map((t) => t.signature)).toEqual(["OK", "FAILED"]);
+  });
+
+  it("reads program queries in smaller windows than wallet ones", async () => {
+    const { fake, bodies } = server();
+    const source = hypersync({ kind: "solana", apiToken: "t", fetch: fake });
+    await batches(source, { fromBlock: 0, toBlock: 25_000, addresses: [], logs: [{ programs: [CLMM], kinds: ["data"], balances: false }] });
+    expect(bodies.map((b) => [b.from_slot, b.to_slot])).toEqual([
+      [0, 10_000],
+      [10_000, 20_000],
+      [20_000, 25_000],
+    ]);
+    bodies.length = 0;
+    await batches(source, { fromBlock: 0, toBlock: 25_000, addresses: ["W"] });
+    expect(bodies.map((b) => [b.from_slot, b.to_slot])).toEqual([[0, 25_000]]);
+  });
+
+  it("is the only Solana source that serves programs: rpc() refuses them", async () => {
+    const source = rpc({ kind: "solana", url: "http://node", fetch: (async () => new Response("{}")) as unknown as typeof fetch });
+    const query = { fromBlock: 0, toBlock: 10, addresses: ["W"], logs: [{ programs: [CLMM], kinds: ["data" as const], balances: false }] };
+    await expect(async () => {
+      for await (const _ of source.fetch(query)) continue;
+    }).rejects.toThrow(/need hypersync\(\{ kind: "solana" \}\)/);
+  });
+});
+
 describe("sources by provider", () => {
   it("pick the chain with kind, EVM by default", () => {
     expect(hypersync({ url: "https://base.hypersync.xyz" }).kind).toBe("evm");
