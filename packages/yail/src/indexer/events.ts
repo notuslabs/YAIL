@@ -128,8 +128,8 @@ export interface SetupEvent {
 }
 
 type ChainKind<C extends Config<any, any, any>, ref> = ref extends string
-  ? C["chains"][ref]["source"]["kind"]
-  : C["chains"][keyof ref & string]["source"]["kind"];
+  ? NonNullable<C["chains"][ref]>["source"]["kind"]
+  : NonNullable<C["chains"][keyof ref & string]>["source"]["kind"];
 
 type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; solana: SolanaAccountEvent };
 
