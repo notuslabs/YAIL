@@ -10,7 +10,7 @@ export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRe
 export interface ChainConfig<S extends Source = Source> {
   /** Chain id (EVM) or a string id such as "bitcoin" or "solana". */
   id: number | string;
-  /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `esplora()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
+  /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `helius()` (Solana), `esplora()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
   source: S;
   /**
    * Source for address history: `backfill_address` and `reindex_scope` jobs read through it, the live loop and

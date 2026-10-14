@@ -81,6 +81,7 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
 | `hypersync({ kind: "solana", apiToken? })` | Solana through Solana HyperSync: wallets (their SOL and the token accounts they own) and [programs](#solana-programs). Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
 | `rpc({ kind: "solana", url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions. No programs |
+| `helius({ url })` | Solana wallets through Helius's `getTransactionsForAddress` (Helius only): each wallet's transactions and its token accounts', up to 1,000 per call. Same rows as `rpc({ kind: "solana" })` from slot 111,491,819 (December 2022) on. No programs |
 | `union(a, b, …)` | one chain from several sources: each range goes to the first source that holds it (see below) |
 | `cached(source, { db, chain })` | ClickHouse page cache in front of any source; `cache: { source: true }` in the config does this for every chain |
 | `fixtureSource(fixture)` | replay recorded data in tests |
@@ -92,6 +93,12 @@ solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind:
 ```
 
 Recent slots come from HyperSync (a range scan: cheap per wallet set, any number of wallets), older ones from RPC (per address: cheap for the rare wallet with old history). Address backfills fetch their whole range in one go, so the RPC pages each wallet once. Solana HyperSync finds where its history starts with one-slot probes that match nothing (a binary search the first time, then one probe per hour, since the floor only moves down). The head is the first source's.
+
+`rpc({ kind: "solana" })` uses standard methods only, so it runs on any provider (Alchemy, Helius, …), at one `getTransaction` per transaction: those of the range, plus the wallet's own ones up to the head, read once to find token accounts it closed since. `helius({ url })` runs on Helius only (`https://mainnet.helius-rpc.com/?api-key=…`) and, from slot 111,491,819 (December 2022) on, reads only the range, up to 1,000 full transactions per call at 10 credits per 100. Helius knows a wallet's token accounts from the owner that token balances record since that slot. Below it, `helius()` first asks each wallet for one signature of its own there (one call, 10 credits). A wallet that has one is read there like `rpc({ kind: "solana" })` reads it, at that cost: one `getTransaction` per transaction of the wallet from the range's start up to the head. A wallet without one gets no rows below that slot, which misses the older rows of a token account someone else opened for it or handed to it without naming the wallet (`InitializeAccount2`/`3`, `SetAuthority`).
+
+```ts
+solana: { id: "solana", source: union(hypersync({ kind: "solana" }), helius({ url: process.env.HELIUS_URL! })) },
+```
 
 A chain's `backfillSource` is where address history is read: `backfill_address` and `reindex_scope` jobs fetch through it, the live loop and `reindex_range` through `source`. It must be of the same kind as `source`, defaults to `source`, and `cache.source` wraps it too. A HyperSync scan costs its block range whatever the number of wallets, so one new Solana wallet's history is cheaper over RPC:
 
@@ -346,7 +353,7 @@ await indexer.run();                                   // index to the fixture h
 expect((await indexer.db.find(poolState, { pool }))!.liquidity).toBe(fixture.expected.liquidity);
 ```
 
-Fixtures are recorded from a real chain (`yail record --chain base --from … --to … --out fixture.json`, or `recordEvmFixture` in a script) and can carry `expected` ground truth read at the same block. `packages/yail/test/real-data.test.ts` checks a Uniswap V3 pool's price and liquidity against `slot0()`, USDC wallet deltas against `balanceOf()`, Bitcoin address totals against Esplora stats, a Solana wallet's whole history (through `union()` of a HyperSync and an RPC recording) against its SOL and 50 token balances, Raydium CLMM pools' price and liquidity against their `PoolState` accounts, and Raydium AMM v4 swaps against their `ray_log` lines.
+Fixtures are recorded from a real chain (`yail record --chain base --from … --to … --out fixture.json`, or `recordEvmFixture` in a script) and can carry `expected` ground truth read at the same block. `packages/yail/test/real-data.test.ts` checks a Uniswap V3 pool's price and liquidity against `slot0()`, USDC wallet deltas against `balanceOf()`, Bitcoin address totals against Esplora stats, a Solana wallet's whole history (through `union()` of a HyperSync and an RPC recording) against its SOL and 50 token balances, Raydium CLMM pools' price and liquidity against their `PoolState` accounts, and Raydium AMM v4 swaps against their `ray_log` lines. With `HELIUS_URL` set, `packages/yail/test/helius.test.ts` also compares `helius()` with `rpc({ kind: "solana" })` on a mainnet wallet.
 
 ## CLI
 
@@ -363,7 +370,7 @@ yail status              --url http://localhost:42069
 ## Limits and notes
 
 - Bitcoin is scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs.
-- Solana HyperSync keeps only recent slots, and plain Solana RPC throttles `getTransaction` (the public endpoint to ~0.5/s): use a paid RPC behind `rpc({ kind: "solana" })` for older history at any scale. Transfers into a token account do not name its owner, so the Solana `rpc` also walks the wallet's token accounts (open ones from `getTokenAccountsByOwner`, closed ones from the wallet's own transactions).
+- Solana HyperSync keeps only recent slots, and plain Solana RPC throttles `getTransaction` (the public endpoint to ~0.5/s): use a paid RPC behind `rpc({ kind: "solana" })`, or `helius()`, for older history at any scale. Transfers into a token account do not name its owner, so the Solana `rpc` also walks the wallet's token accounts (open ones from `getTokenAccountsByOwner`, closed ones from the wallet's own transactions).
 - Internal ETH transfers are only visible through traces, which HyperSync serves on a few chains as a paid add-on (see Wallet activity).
 - ClickHouse has no transactions: a crash between a table flush and the checkpoint is repaired by the ReplacingMergeTree key on the next run, so give every table a real identity key.
 - Cross-chain ordering is not enforced (chains are independent loops).

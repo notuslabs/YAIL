@@ -61,15 +61,19 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** An HTTP response body, retried with backoff on 429, 5xx and network errors. Other statuses throw at once. */
+/**
+ * An HTTP response body, retried with backoff on 429, 5xx and network errors. Other statuses throw at once. Errors
+ * name the host only: providers put API keys in the path (Alchemy) or the query (Helius).
+ */
 export async function request(doFetch: typeof fetch, url: string, init: RequestInit = {}): Promise<string> {
+  const { host } = new URL(url);
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await doFetch(url, init);
       if (res.ok) return await res.text();
       const body = await res.text().catch(() => "");
-      if (res.status !== 429 && res.status < 500) throw new HttpError(`${url}: HTTP ${res.status} ${body.slice(0, 300)}`);
-      if (attempt === 12) throw new Error(`${url}: HTTP ${res.status} after ${attempt} attempts`);
+      if (res.status !== 429 && res.status < 500) throw new HttpError(`${host}: HTTP ${res.status} ${body.slice(0, 300)}`);
+      if (attempt === 12) throw new Error(`${host}: HTTP ${res.status} after ${attempt} attempts`);
     } catch (err) {
       if (err instanceof HttpError || init.signal?.aborted || attempt === 12) throw err;
     }

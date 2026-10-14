@@ -336,6 +336,12 @@ describe("rpc({ kind: \"solana\" })", () => {
     ]);
     expect(calls.filter(([m]) => m === "getBlock")).toEqual([["getBlock", 5]]);
   });
+
+  it("names only the node's host in HTTP errors, not the key in its path", async () => {
+    const unauthorized = (async () => new Response("Unauthorized", { status: 401 })) as typeof fetch;
+    const source = rpc({ kind: "solana", url: "https://solana-mainnet.g.alchemy.com/v2/secret-key", fetch: unauthorized });
+    await expect(source.getHeight()).rejects.toThrow(new Error("solana-mainnet.g.alchemy.com: HTTP 401 Unauthorized"));
+  });
 });
 
 describe("Solana accounts", () => {
