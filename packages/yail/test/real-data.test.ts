@@ -8,9 +8,11 @@ import { parseAbi } from "viem";
 import { startTestClickHouse, readFixture, fixtureSource, type TestClickHouse, type EvmFixture, type BitcoinFixture, type SolanaFixture } from "../src/testing/index.js";
 import { union } from "../src/sources/union.js";
 import { createConfig, addressSet } from "../src/config/index.js";
-import { anchorEvent, b, decode, instruction, programLog } from "../src/solana/index.js";
+import { anchorDiscriminator, anchorEvent, b, decode, instruction, programData, programLog } from "../src/solana/index.js";
 import { createIndexer } from "../src/indexer/indexer.js";
 import type { HandlerContext } from "../src/indexer/context.js";
+import type { SolanaInstructionEvent } from "../src/indexer/events.js";
+import type { SolanaLog } from "../src/sources/types.js";
 import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
 import type { Db } from "../src/db/client.js";
@@ -282,7 +284,9 @@ describe("Raydium CLMM on Solana", () => {
     });
     await indexer.run();
     db = indexer.db;
-    expect(swaps).toBeGreaterThan(500);
+    const swapEvents = fixture.logs!.filter((l) => l.program === expected.program && l.kind === "data" && Buffer.from(programData(l.message)).toString("hex").startsWith(anchorDiscriminator("event", "SwapEvent")));
+    expect(swapEvents).toHaveLength(831);
+    expect(swaps).toBe(swapEvents.length);
     const pools = Object.entries(expected.pools);
     expect(pools.length).toBeGreaterThanOrEqual(10);
     for (const [pool, onChain] of pools) {
@@ -297,7 +301,7 @@ describe("Raydium AMM v4 on Solana, before log lines had instruction addresses",
   const swapIn = b.struct({ amountIn: b.u64, minimumAmountOut: b.u64 });
   const swapOut = b.struct({ maxAmountIn: b.u64, amountOut: b.u64 });
   /** Swap ray_logs: 57 bytes, type 3 (SwapBaseIn) or 4 (SwapBaseOut), then the instruction's two arguments, then the reserves. */
-  const swapLogs = (logs: Array<{ message: string }>) =>
+  const swapLogs = (logs: SolanaLog[]) =>
     logs.flatMap((l) => {
       const text = programLog(l.message);
       if (!text.startsWith("ray_log: ")) return [];
@@ -329,7 +333,7 @@ describe("Raydium AMM v4 on Solana, before log lines had instruction addresses",
     });
     const indexer = createIndexer({ config, schema: {} });
     const outcome = { matched: 0, mismatched: 0, skipped: 0, laterInTransaction: 0 };
-    const pair = (event: { ordinal: number; programInstructions: unknown[]; programLogs: Array<{ message: string; instructionAddress: number[] | null }> }, logType: number, matches: (args: Uint8Array) => boolean) => {
+    const pair = (event: SolanaInstructionEvent, logType: number, matches: (args: Uint8Array) => boolean) => {
       expect(event.programLogs.every((l) => l.instructionAddress === null)).toBe(true);
       const logs = swapLogs(event.programLogs);
       if (logs.length !== event.programInstructions.length) {

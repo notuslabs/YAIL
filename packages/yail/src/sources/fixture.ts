@@ -139,7 +139,7 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
 }
 
 /**
- * The recorded rows a Solana query matches in [from, to), with HyperSync's semantics: an instruction filter with `logs`
+ * The recorded rows a Solana query matches in [from, to), with HyperSync's semantics: an instruction filter with `logKinds`
  * matches only transactions where its programs also wrote such a line, and returns those lines too.
  */
 function replaySolana(fixture: SolanaFixture, query: SolanaQuery, from: number, to: number): SolanaBatch {
@@ -152,8 +152,8 @@ function replaySolana(fixture: SolanaFixture, query: SolanaQuery, from: number, 
   const joined = new Set<string>();
   for (const f of query.instructions ?? []) {
     let matched = instructions.filter((i) => instructionMatches(i, f));
-    if (f.logs.length > 0) {
-      const written = logs.filter((l) => f.programs.includes(l.program) && f.logs.includes(l.kind));
+    if (f.logKinds.length > 0) {
+      const written = logs.filter((l) => f.programs.includes(l.program) && f.logKinds.includes(l.kind));
       const wrote = new Set(written.map((l) => l.signature));
       matched = matched.filter((i) => wrote.has(i.signature));
       const kept = new Set(matched.map((i) => i.signature));

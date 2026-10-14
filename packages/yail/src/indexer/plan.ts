@@ -304,11 +304,10 @@ export function buildSolanaQuery(plan: ChainPlan, from: number, to: number, regi
   for (const p of plan.programs) {
     if (options.override || !(p.startBlock < to && (p.endBlock === undefined || p.endBlock >= from))) continue;
     if (p.instructions.length > 0) {
-      const logKinds: SolanaInstructionFilter["logs"] = p.includeLogs ? ["log", "data"] : [];
-      instructions.push({ programs: p.addresses, discriminators: p.instructions.map((i) => i.def.discriminator), logs: logKinds, balances: p.includeBalances });
+      instructions.push({ programs: p.addresses, discriminators: p.instructions.map((i) => i.def.discriminator), logKinds: p.includeLogs ? ["log", "data"] : [], balances: p.includeBalances });
     }
     if (p.events.length === 0) continue;
-    if (p.emit === "cpi") instructions.push({ programs: p.addresses, discriminators: [EMIT_CPI_TAG], isInner: true, logs: [], balances: p.includeBalances });
+    if (p.emit === "cpi") instructions.push({ programs: p.addresses, discriminators: [EMIT_CPI_TAG], isInner: true, logKinds: [], balances: p.includeBalances });
     else logs.push({ programs: p.addresses, kinds: ["data"], balances: p.includeBalances });
   }
   return { fromBlock: from, toBlock: to, addresses, instructions, logs };

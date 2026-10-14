@@ -8,7 +8,7 @@ import { buildAddressQuery, buildPlans } from "../src/indexer/plan.js";
 import { solanaAccountEvent } from "../src/indexer/events.js";
 import { AddressRegistry } from "../src/addresses/registry.js";
 import { createConfig } from "../src/config/index.js";
-import type { BitcoinBatch, BitcoinQuery, BitcoinSource, SolanaBalance } from "../src/sources/types.js";
+import type { BitcoinBatch, BitcoinQuery, BitcoinSource, SolanaBalance, SolanaQuery, SolanaSource } from "../src/sources/types.js";
 import type { Db } from "../src/db/client.js";
 
 /** A Bitcoin-shaped source that serves one empty batch per query and records what it was asked. */
@@ -174,7 +174,7 @@ describe("hypersync({ kind: \"solana\" }) programs", () => {
     return { fake, bodies };
   }
 
-  async function batches(source: ReturnType<typeof hypersync>, query: Parameters<ReturnType<typeof hypersync>["fetch"]>[0]) {
+  async function batches(source: SolanaSource, query: SolanaQuery) {
     const out = [];
     for await (const batch of source.fetch(query)) out.push(batch);
     return out;
@@ -187,8 +187,8 @@ describe("hypersync({ kind: \"solana\" }) programs", () => {
       toBlock: 101,
       addresses: ["W"],
       instructions: [
-        { programs: [AMM], discriminators: ["09", "2b04ed0b1ac91e62"], logs: ["log", "data"], balances: false },
-        { programs: [PUMP], discriminators: ["e445a52e51cb9a1d"], isInner: true, logs: [], balances: false },
+        { programs: [AMM], discriminators: ["09", "2b04ed0b1ac91e62"], logKinds: ["log", "data"], balances: false },
+        { programs: [PUMP], discriminators: ["e445a52e51cb9a1d"], isInner: true, logKinds: [], balances: false },
       ],
       logs: [{ programs: [CLMM], kinds: ["data"], balances: true }],
     });
@@ -219,7 +219,7 @@ describe("hypersync({ kind: \"solana\" }) programs", () => {
       fromBlock: 100,
       toBlock: 101,
       addresses: ["W"],
-      instructions: [{ programs: [CLMM], discriminators: [], logs: ["log", "data"], balances: true }],
+      instructions: [{ programs: [CLMM], discriminators: [], logKinds: ["log", "data"], balances: true }],
       logs: [{ programs: [CLMM], kinds: ["data"], balances: false }],
     });
     expect(batch!.instructions.map((i) => [i.signature, i.address, i.isInner])).toEqual([["OK", [0], false]]);

@@ -206,7 +206,7 @@ async function recordRaydiumClmm() {
   const accounts = await solanaRpc<{ context: { slot: number }; value: Array<{ data: [string, string] } | null> }>("getMultipleAccounts", [pools, { encoding: "base64", commitment: "confirmed" }]);
   const readSlot = accounts.context.slot;
   while ((await hs.getHeight()) <= readSlot + 40) await pause(2000);
-  const touched = await recordSolanaFixture(hs, { fromBlock: query.fromBlock, toBlock: readSlot + 1, addresses: [], instructions: [{ programs: [RAYDIUM_CLMM], discriminators: [], logs: [], balances: false }] });
+  const touched = await recordSolanaFixture(hs, { fromBlock: query.fromBlock, toBlock: readSlot + 1, addresses: [], instructions: [{ programs: [RAYDIUM_CLMM], discriminators: [], logKinds: [], balances: false }] });
   const lastTouch = new Map<string, string>();
   for (const i of touched.instructions ?? []) for (const account of i.accounts) lastTouch.set(account, i.signature);
   const expected: Record<string, { sqrtPriceX64: bigint; liquidity: bigint }> = {};
@@ -225,7 +225,7 @@ async function recordRaydiumClmm() {
 /** Raydium AMM v4 swap instructions with the program's log lines (its `ray_log` per swap), in an era without log instruction addresses. */
 async function recordRaydiumAmmV4() {
   const hs = hypersync({ kind: "solana", concurrency: 4 });
-  const query: SolanaQuery = { fromBlock: AMM_V4_RANGE.from, toBlock: AMM_V4_RANGE.to, addresses: [], instructions: [{ programs: [RAYDIUM_AMM_V4], discriminators: ["09", "0b", "10", "11"], logs: ["log", "data"], balances: false }] };
+  const query: SolanaQuery = { fromBlock: AMM_V4_RANGE.from, toBlock: AMM_V4_RANGE.to, addresses: [], instructions: [{ programs: [RAYDIUM_AMM_V4], discriminators: ["09", "0b", "10", "11"], logKinds: ["log", "data"], balances: false }] };
   const fixture = await recordSolanaFixture(hs, query, { name: "solana-raydium-amm-v4" });
   writeFixture(`${out}solana-raydium-amm-v4.json`, fixture);
   console.log(`ammv4: ${fixture.instructions?.length} swaps and ${fixture.logs?.length} log lines in ${fixture.transactions.length} transactions`);

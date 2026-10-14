@@ -200,7 +200,7 @@ export interface SolanaInstructionFilter {
    * Also the log lines of these kinds the programs wrote in each matched transaction, in the same request (HyperSync
    * intersects the two per transaction: a transaction where the programs wrote no such line matches nothing). Empty = none.
    */
-  logs: Array<"log" | "data">;
+  logKinds: Array<"log" | "data">;
   /** Also every balance change of each matched transaction (`joinedBalances`). */
   balances: boolean;
 }
@@ -305,7 +305,12 @@ export interface SolanaSource extends SourceBase {
 export type Source = EvmSource | BitcoinSource | SolanaSource;
 export type SourceKind = Source["kind"];
 export type QueryOf<S extends Source> = S extends EvmSource ? EvmQuery : S extends BitcoinSource ? BitcoinQuery : SolanaQuery;
-export type BatchOf<S extends Source> = S extends EvmSource ? EvmBatch : S extends BitcoinSource ? BitcoinBatch : SolanaBatch;
+export interface BatchByKind {
+  evm: EvmBatch;
+  bitcoin: BitcoinBatch;
+  solana: SolanaBatch;
+}
+export type BatchOf<S extends Source> = BatchByKind[S["kind"]];
 
 /** Sort key for deterministic ordering of logs within a chain. */
 export function logOrder(a: EvmLog, b: EvmLog): number {

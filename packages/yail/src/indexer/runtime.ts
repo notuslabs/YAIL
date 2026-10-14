@@ -617,8 +617,8 @@ export class ChainRunner {
       for (const p of this.plan.programs) {
         if (transaction.slot < p.startBlock || (p.endBlock !== undefined && transaction.slot > p.endBlock)) continue;
         const balances = p.includeBalances ? (balancesOf.get(transaction.signature) ?? []) : [];
-        const at = { transaction, block, balances };
-        hits.push(...this.instructionHits(p, instructions, logs, at), ...this.emittedHits(p, instructions, logs, at));
+        const shared = { transaction, block, balances };
+        hits.push(...this.instructionHits(p, instructions, logs, shared), ...this.emittedHits(p, instructions, logs, shared));
       }
       hits.sort((a, b) => compareAddress(a.position, b.position) || Number(a.isLogLine) - Number(b.isLogLine));
       hits.forEach((hit, rank) => events.push({ block: transaction.slot, txIndex: transaction.transactionIndex, logIndex: rank + 1, name: hit.name, ...hit.event }));
@@ -626,7 +626,7 @@ export class ChainRunner {
     return events;
   }
 
-  private instructionHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], at: TransactionContext): ProgramHit[] {
+  private instructionHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], shared: TransactionContext): ProgramHit[] {
     if (p.instructions.length === 0) return [];
     const matched = instructions.flatMap((instruction) => {
       if (!p.addresses.includes(instruction.program) || isEventCpi(instruction)) return [];
@@ -643,10 +643,10 @@ export class ChainRunner {
         const args = tryDecode(handled.def.args, Buffer.from(instruction.data.slice(handled.def.discriminator.length), "hex"));
         const accounts = bindAccounts(handled.def.accounts, instruction.accounts);
         if (!args || !accounts) {
-          this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, handler: name, tx: at.transaction.signature, address: instruction.address });
+          this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, program: p.name, instruction: handled.name, tx: shared.transaction.signature, address: instruction.address });
           continue;
         }
-        const payload: SolanaInstructionEvent = { name: handled.name, program, args: args.value, accounts, accountList: instruction.accounts, data: instruction.data, address: instruction.address, isInner: instruction.isInner, ordinal, programInstructions, programLogs, ...at };
+        const payload: SolanaInstructionEvent = { name: handled.name, program, args: args.value, accounts, accountList: instruction.accounts, data: instruction.data, address: instruction.address, isInner: instruction.isInner, ordinal, programInstructions, programLogs, ...shared };
         hits.push({ position: instruction.address, isLogLine: false, name, event: { kind: "solanaInstruction", payload } });
       }
     }
@@ -654,33 +654,33 @@ export class ChainRunner {
   }
 
   /** Events of `emit_cpi!` programs come from their self-CPI instructions, those of `emit!` programs from `Program data:` lines. */
-  private emittedHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], at: TransactionContext): ProgramHit[] {
+  private emittedHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], shared: TransactionContext): ProgramHit[] {
     if (p.events.length === 0) return [];
     if (p.emit === "cpi") {
       return instructions.flatMap((i) => {
         if (!p.addresses.includes(i.program) || !isEventCpi(i)) return [];
-        return this.programHit(p, at, { payload: i.data.slice(EMIT_CPI_TAG.length), program: i.program, address: i.address.slice(0, -1), position: i.address, isLogLine: false });
+        return this.programHit(p, shared, { payload: i.data.slice(EMIT_CPI_TAG.length), program: i.program, address: i.address.slice(0, -1), position: i.address, isLogLine: false });
       });
     }
     return logs.flatMap((l) => {
       if (l.kind !== "data" || !p.addresses.includes(l.program)) return [];
       const payload = Buffer.from(programData(l.message)).toString("hex");
-      return this.programHit(p, at, { payload, program: l.program, address: l.instructionAddress, position: l.instructionAddress ?? [], isLogLine: true });
+      return this.programHit(p, shared, { payload, program: l.program, address: l.instructionAddress, position: l.instructionAddress ?? [], isLogLine: true });
     });
   }
 
   /** The event an emitted `payload` (hex) holds, decoded; none when the program has no handler for it. */
-  private programHit(p: ProgramSource, at: TransactionContext, emitted: { payload: string; program: string; address: number[] | null; position: number[]; isLogLine: boolean }): ProgramHit[] {
+  private programHit(p: ProgramSource, shared: TransactionContext, emitted: { payload: string; program: string; address: number[] | null; position: number[]; isLogLine: boolean }): ProgramHit[] {
     const { payload, program, address, position, isLogLine } = emitted;
     const handled = p.events.find((e) => payload.startsWith(e.def.discriminator));
     if (!handled) return [];
     const name = `${p.name}:${handled.name}`;
     const data = tryDecode(handled.def.data, Buffer.from(payload.slice(handled.def.discriminator.length), "hex"));
     if (!data) {
-      this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, handler: name, tx: at.transaction.signature, address });
+      this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, program: p.name, eventName: handled.name, tx: shared.transaction.signature, address });
       return [];
     }
-    return [{ position, isLogLine, name, event: { kind: "solanaProgram", payload: { name: handled.name, program, data: data.value, address, ...at } } }];
+    return [{ position, isLogLine, name, event: { kind: "solanaProgram", payload: { name: handled.name, program, data: data.value, address, ...shared } } }];
   }
 
   // ------------------------------------------------------------ dispatch

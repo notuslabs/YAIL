@@ -238,7 +238,9 @@ indexer.on("RaydiumAmmV4:swapBaseIn", ({ event }) => {
 - Only successful transactions are delivered. Inside a transaction, events go by address (`[1] < [1, 0] < [2]`), an
   instruction before the log lines it wrote, after the transaction's wallet events. That order is also the rows'
   `_yail_version`.
-- `chain: {}` plans nothing and keeps the handlers typed: a program can be wired up and left off.
+- `chain: {}` plans nothing and keeps the handlers typed: a program can be wired up and left off. A program on a chain
+  missing from `chains` is a config error, as for contracts and accounts, so an app that picks its chains at runtime
+  gives such a program `chain: {}`.
 - Programs need `hypersync({ kind: "solana" })` from its first slot (391,000,000 as of 2026-10): `rpc({ kind: "solana" })`
   refuses them, so a program that starts lower fails loudly through `union()`. Address backfills fetch wallets only,
   so a program added to a running chain is indexed from the cursor on. Program queries are read in windows of 10,000

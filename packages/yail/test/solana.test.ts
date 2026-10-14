@@ -4,12 +4,13 @@ import { createConfig } from "../src/config/index.js";
 import type { Config } from "../src/config/types.js";
 import { buildPlans, buildSolanaQuery } from "../src/indexer/plan.js";
 import { createIndexer } from "../src/indexer/indexer.js";
+import type { HandlerContext } from "../src/indexer/context.js";
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
 import { AddressRegistry } from "../src/addresses/registry.js";
 import { cached } from "../src/sources/cached.js";
 import { fixtureSource, type SolanaFixture } from "../src/sources/fixture.js";
-import type { SolanaBalance, SolanaInstruction, SolanaLog, SolanaTransaction } from "../src/sources/types.js";
+import type { SolanaBalance, SolanaInstruction, SolanaLog, SolanaQuery, SolanaTransaction } from "../src/sources/types.js";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
@@ -125,13 +126,15 @@ describe("solana program definitions", () => {
     const solana = fixtureSource({ version: 1, kind: "solana", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], balances: [] });
     const chains = { base: { id: 8453, source: evm }, solana: { id: "solana", source: solana } };
     const program = { address: AMM, instructions: { swap: instruction({ discriminator: "09" }) } };
-    expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { ...program, chain: "base" } } })).toThrow(/chain "base" is not a Solana chain/);
+    const onBase = createConfig({ database: { url: "http://x" }, chains, programs: { P: { ...program, chain: "base" } } });
+    expect(() => buildPlans(onBase, { handled: new Set(["P:swap"]), resolveLatest: () => 0 })).toThrow(/chain "base" is not a Solana chain/);
     expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { ...program, chain: "nope" } } })).toThrow(/unknown chain "nope"/);
     expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { ...program, chain: "solana", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" } } })).toThrow(/invalid program id/);
     expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { chain: "solana", address: AMM, instructions: { swap: instruction({ discriminator: "0x09" }) } } } })).toThrow(/discriminator "0x09"/);
     expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { chain: "solana", address: AMM, instructions: { swap: instruction({ discriminator: "090909" }) } } } })).toThrow(/1, 2, 4 or 8 bytes/);
     expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { chain: "solana", address: AMM, instructions: { Swap: instruction({ discriminator: "09" }) }, events: { Swap: anchorEvent("Swap", b.struct({})) } } } })).toThrow(/both an instruction and an event/);
-    expect(() => createConfig({ database: { url: "http://x" }, chains, programs: { P: { ...program, chain: {} } } })).not.toThrow();
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: chains.base }, programs: { P: { ...program, chain: {} } } })).not.toThrow();
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: chains.base }, programs: { P: { ...program, chain: { solana: {} } } } })).toThrow(/unknown chain "solana"/);
   });
 });
 
@@ -147,8 +150,8 @@ describe("buildSolanaQuery", () => {
       toBlock: 20,
       addresses: [WALLET],
       instructions: [
-        { programs: [AMM], discriminators: ["2b04ed0b1ac91e62", "09"], logs: ["log", "data"], balances: false },
-        { programs: [PUMP], discriminators: [EMIT_CPI_TAG], isInner: true, logs: [], balances: false },
+        { programs: [AMM], discriminators: ["2b04ed0b1ac91e62", "09"], logKinds: ["log", "data"], balances: false },
+        { programs: [PUMP], discriminators: [EMIT_CPI_TAG], isInner: true, logKinds: [], balances: false },
       ],
       logs: [{ programs: [CLMM], kinds: ["data"], balances: true }],
     });
@@ -161,8 +164,8 @@ describe("buildSolanaQuery", () => {
 
   it("plans nothing for a program on chain {} or on a chain the config does not have", () => {
     expect(plan.programs.some((p) => p.name === "Off")).toBe(false);
-    const solanaOnly: Config = { ...programsConfig(), chains: {} };
-    expect(buildPlans(solanaOnly, { handled, resolveLatest: () => 1000 }).size).toBe(0);
+    const noChains: Config = { ...programsConfig(), chains: {} };
+    expect(buildPlans(noChains, { handled, resolveLatest: () => 1000 }).size).toBe(0);
   });
 });
 
@@ -253,19 +256,19 @@ describe("solana programs end to end", () => {
     const config = programsConfig(fixtureSource(fixture));
     const indexer = createIndexer({ config: { ...config, database: ch.database() }, schema: { calls } });
     const seen: string[] = [];
-    const record = (signature: string, handler: string, detail: unknown, insert: (row: { signature: string; handler: string; detail: string }) => void) => {
+    const record = (context: HandlerContext, signature: string, handler: string, detail: unknown) => {
       const row = { signature, handler, detail: JSON.stringify(detail, (_k, v) => (typeof v === "bigint" ? v.toString() : v)) };
       seen.push(`${signature} ${handler} ${row.detail}`);
-      insert(row);
+      context.db.insert(calls).values(row);
     };
-    indexer.on("Wallets:transaction", ({ event, context }) => record(event.transaction.signature, "wallet", event.lamports, (row) => context.db.insert(calls).values(row)));
-    indexer.on("Clmm:swap", ({ event, context }) => record(event.transaction.signature, "Clmm:swap", { pool: event.accounts.pool, amount: event.args.amount, balances: event.balances.map((x) => x.account) }, (row) => context.db.insert(calls).values(row)));
-    indexer.on("Clmm:SwapEvent", ({ event, context }) => record(event.transaction.signature, "Clmm:SwapEvent", { address: event.address, amount: event.data.amount, pool: event.data.pool }, (row) => context.db.insert(calls).values(row)));
+    indexer.on("Wallets:transaction", ({ event, context }) => record(context, event.transaction.signature, "wallet", event.lamports));
+    indexer.on("Clmm:swap", ({ event, context }) => record(context, event.transaction.signature, "Clmm:swap", { pool: event.accounts.pool, amount: event.args.amount, balances: event.balances.map((x) => x.account) }));
+    indexer.on("Clmm:SwapEvent", ({ event, context }) => record(context, event.transaction.signature, "Clmm:SwapEvent", { address: event.address, amount: event.data.amount, pool: event.data.pool }));
     indexer.on("Amm:swapBaseIn", ({ event, context }) => {
       const detail = { address: event.address, ordinal: event.ordinal, amountIn: event.args.amountIn, siblings: event.programInstructions.map((i) => i.address), logs: event.programLogs.map((l) => l.message) };
-      record(event.transaction.signature, "Amm:swapBaseIn", detail, (row) => context.db.insert(calls).values(row));
+      record(context, event.transaction.signature, "Amm:swapBaseIn", detail);
     });
-    indexer.on("Pump:BuyEvent", ({ event, context }) => record(event.transaction.signature, "Pump:BuyEvent", { address: event.address, out: event.data.baseAmountOut }, (row) => context.db.insert(calls).values(row)));
+    indexer.on("Pump:BuyEvent", ({ event, context }) => record(context, event.transaction.signature, "Pump:BuyEvent", { address: event.address, out: event.data.baseAmountOut }));
     indexer.on("Off:SellEvent", () => {
       throw new Error("a chain {} program must not run");
     });
@@ -293,7 +296,7 @@ describe("solana programs end to end", () => {
     dbs.push(db);
     const inner = fixtureSource(fixture, { blocksPerBatch: 21 });
     const source = cached(inner, { db, chain: "solana" });
-    const query = { fromBlock: 0, toBlock: 21, addresses: [WALLET], instructions: [{ programs: [AMM], discriminators: ["09"], logs: ["log" as const], balances: false }], logs: [{ programs: [CLMM], kinds: ["data" as const], balances: true }] };
+    const query: SolanaQuery = { fromBlock: 0, toBlock: 21, addresses: [WALLET], instructions: [{ programs: [AMM], discriminators: ["09"], logKinds: ["log"], balances: false }], logs: [{ programs: [CLMM], kinds: ["data"], balances: true }] };
     for await (const _ of source.fetch(query)) continue;
     const read = async (from: typeof inner) => {
       const out = [];

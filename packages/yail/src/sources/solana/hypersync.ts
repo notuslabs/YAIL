@@ -228,17 +228,17 @@ export function solanaHypersync(options: SolanaHypersyncOptions): SolanaSource {
 
 /**
  * The requests a query needs. HyperSync intersects the selections of different tables per transaction, so wallets,
- * instructions and log lines go in separate requests, except an instruction filter with `logs`, whose request
+ * instructions and log lines go in separate requests, except an instruction filter with `logKinds`, whose request
  * carries both on purpose. Those come first: their log lines are complete for their programs and kinds.
  */
 function requestsOf(query: SolanaQuery): WindowRequest[] {
   const instructions = query.instructions ?? [];
   const logs = query.logs ?? [];
   const requests = instructions
-    .filter((f) => f.logs.length > 0)
-    .map((f) => programRequest({ instruction_calls: instructionSelections(f), logs: [{ program_id: f.programs, kind: f.logs }] }, { instruction_call: INSTRUCTION_FIELDS, log: LOG_FIELDS }, f.balances));
+    .filter((f) => f.logKinds.length > 0)
+    .map((f) => programRequest({ instruction_calls: instructionSelections(f), logs: [{ program_id: f.programs, kind: f.logKinds }] }, { instruction_call: INSTRUCTION_FIELDS, log: LOG_FIELDS }, f.balances));
   for (const balances of [false, true]) {
-    const plain = instructions.filter((f) => f.logs.length === 0 && f.balances === balances);
+    const plain = instructions.filter((f) => f.logKinds.length === 0 && f.balances === balances);
     if (plain.length > 0) requests.push(programRequest({ instruction_calls: plain.flatMap(instructionSelections) }, { instruction_call: INSTRUCTION_FIELDS }, balances));
     const lines = logs.filter((f) => f.balances === balances);
     if (lines.length > 0) requests.push(programRequest({ logs: lines.map((f) => ({ program_id: f.programs, kind: f.kinds })) }, { log: LOG_FIELDS }, balances));
