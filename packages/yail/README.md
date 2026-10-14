@@ -79,8 +79,8 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 | `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
-| `hypersync({ kind: "solana", apiToken? })` | Solana wallets through Solana HyperSync: their SOL and the token accounts they own. Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
-| `rpc({ kind: "solana", url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions |
+| `hypersync({ kind: "solana", apiToken? })` | Solana through Solana HyperSync: wallets (their SOL and the token accounts they own) and [programs](#solana-programs). Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
+| `rpc({ kind: "solana", url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions. No programs |
 | `union(a, b, …)` | one chain from several sources: each range goes to the first source that holds it (see below) |
 | `cached(source, { db, chain })` | ClickHouse page cache in front of any source; `cache: { source: true }` in the config does this for every chain |
 | `fixtureSource(fixture)` | replay recorded data in tests |
@@ -159,6 +159,8 @@ indexer.on("Pool:Swap", async ({ event, context }) => {
 indexer.on("Wallets:transaction", ...) // EVM: { transaction, block, address, direction, logs, traces }
                                       // Bitcoin: { tx, block, address, received, sent, net, fee, isSender }
                                       // Solana: { transaction, block, address, balances, lamports, tokens }
+indexer.on("Program:swap", ...)       // Solana instruction: { args, accounts, accountList, data, address, ordinal, programInstructions, programLogs, transaction, block, balances }
+indexer.on("Program:SwapEvent", ...)  // Solana event: { data, address, transaction, block, balances }
 indexer.on("setup", ...)              // once per chain before indexing starts
 ```
 
@@ -184,6 +186,65 @@ Traces come only from trace-enabled HyperSync endpoints (e.g. `https://eth-trace
 empty. Needs HyperSync (`rpc()` refuses whole-transaction queries). The whole-transaction query only carries the
 account's own filters: a contract's logs on the same chain are fetched apart and merged by block, so a DEX's every
 swap does not come back with its transaction and traces.
+
+### Solana programs
+
+`programs` indexes what Solana programs do: the instructions they run, top-level or called by another program, and the
+events they emit. Definitions come from `@notuslabs/yail/solana`: Borsh codecs (`b`) and `instruction()`,
+`anchorInstruction()` and `anchorEvent()`, which recognize an instruction or an event by its first bytes.
+
+```ts
+import { anchorEvent, b, instruction } from "@notuslabs/yail/solana";
+
+const swapEvent = b.struct({ poolState: b.pubkey, sender: b.pubkey, tokenAccount0: b.pubkey, tokenAccount1: b.pubkey, amount0: b.u64,
+  transferFee0: b.u64, amount1: b.u64, transferFee1: b.u64, zeroForOne: b.bool, sqrtPriceX64: b.u128, liquidity: b.u128, tick: b.i32 });
+const swap = b.struct({ amountIn: b.u64, minimumAmountOut: b.u64 });
+const buyEvent = b.struct({ timestamp: b.i64, baseAmountOut: b.u64, maxQuoteAmountIn: b.u64 });
+
+programs: {
+  RaydiumClmm: { chain: "solana", address: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", startBlock: 450_000_000,
+    events: { SwapEvent: anchorEvent("SwapEvent", swapEvent) } },
+  RaydiumAmmV4: { chain: "solana", address: "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", startBlock: 450_000_000, includeLogs: true,
+    instructions: { swapBaseIn: instruction({ discriminator: "09", args: swap }), swapBaseInV2: instruction({ discriminator: "10", args: swap }) } },
+  PumpAmm: { chain: {}, address: "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA", emit: "cpi", events: { BuyEvent: anchorEvent("BuyEvent", buyEvent) } },
+},
+```
+
+```ts
+indexer.on("RaydiumClmm:SwapEvent", ({ event }) => {
+  event.data.sqrtPriceX64; // bigint, typed from the codec
+});
+indexer.on("RaydiumAmmV4:swapBaseIn", ({ event }) => {
+  const swapLogs = event.programLogs.filter(isSwapRayLog); // "ray_log: " lines of 57 bytes, type 3 or 4
+  if (swapLogs.length !== event.programInstructions.length) return; // a truncated log: skip the transaction
+  const log = swapLogs[event.ordinal]; // the k-th swap of the transaction wrote the k-th swap ray_log
+});
+```
+
+- Codecs read little-endian Borsh and ignore bytes past their last field, so an event that grew new fields still
+  decodes. A field only some eras have is read in your own `Codec` with `reader.remaining()`, or kept as hex with
+  `b.rest`. A payload too short for its codec is skipped with a `decode_failed` warning. `instruction({ accounts: [...] })`
+  names the accounts (`event.accounts.pool`); `event.accountList` has them all.
+- `emit: "log"` (Anchor's `emit!`, the default) reads events from `Program data:` lines, `emit: "cpi"` (`emit_cpi!`)
+  from the program's self-CPI instructions. Events without a handler are not decoded.
+- `includeLogs` gives instruction events `programLogs`: every log line the program wrote in the transaction, in order.
+  `ordinal` is the instruction's index in `programInstructions`, the program's matched instructions of the
+  transaction by address. Solana HyperSync records which instruction wrote a line only from slot 416,000,000, so
+  pair lines and instructions by order, as above: it holds in every era. The instructions and their log lines come in
+  one request that HyperSync matches per transaction: a transaction where the program wrote no log line delivers no
+  instruction either.
+- `includeBalances` gives events every SOL and token balance change of their transaction (`event.balances`), for about
+  6.5x the data.
+- Only successful transactions are delivered. Inside a transaction, events go by address (`[1] < [1, 0] < [2]`), an
+  instruction before the log lines it wrote, after the transaction's wallet events. That order is also the rows'
+  `_yail_version`.
+- `chain: {}` plans nothing and keeps the handlers typed: a program can be wired up and left off. A program on a chain
+  missing from `chains` is a config error, as for contracts and accounts, so an app that picks its chains at runtime
+  gives such a program `chain: {}`.
+- Programs need `hypersync({ kind: "solana" })` from its first slot (391,000,000 as of 2026-10): `rpc({ kind: "solana" })`
+  refuses them, so a program that starts lower fails loudly through `union()`. Address backfills fetch wallets only,
+  so a program added to a running chain is indexed from the cursor on. Program queries are read in windows of 10,000
+  slots (`windowSlots`), so a long range never sits in memory whole.
 
 ### Cache
 
@@ -285,7 +346,7 @@ await indexer.run();                                   // index to the fixture h
 expect((await indexer.db.find(poolState, { pool }))!.liquidity).toBe(fixture.expected.liquidity);
 ```
 
-Fixtures are recorded from a real chain (`yail record --chain base --from … --to … --out fixture.json`, or `recordEvmFixture` in a script) and can carry `expected` ground truth read at the same block. `packages/yail/test/real-data.test.ts` checks a Uniswap V3 pool's price and liquidity against `slot0()`, USDC wallet deltas against `balanceOf()`, Bitcoin address totals against Esplora stats, and a Solana wallet's whole history (through `union()` of a HyperSync and an RPC recording) against its SOL and 50 token balances.
+Fixtures are recorded from a real chain (`yail record --chain base --from … --to … --out fixture.json`, or `recordEvmFixture` in a script) and can carry `expected` ground truth read at the same block. `packages/yail/test/real-data.test.ts` checks a Uniswap V3 pool's price and liquidity against `slot0()`, USDC wallet deltas against `balanceOf()`, Bitcoin address totals against Esplora stats, a Solana wallet's whole history (through `union()` of a HyperSync and an RPC recording) against its SOL and 50 token balances, Raydium CLMM pools' price and liquidity against their `PoolState` accounts, and Raydium AMM v4 swaps against their `ray_log` lines.
 
 ## CLI
 

@@ -11,7 +11,7 @@ import { createHttpClient } from "../src/http/client.js";
 import { cached } from "../src/sources/cached.js";
 import { fixtureSource, readFixture } from "../src/sources/fixture.js";
 import { walletOf } from "../src/sources/solana/shared.js";
-import type { Source } from "../src/sources/types.js";
+import type { BitcoinQuery, EvmQuery, RangeBatch, RangeQuery, SolanaQuery, Source } from "../src/sources/types.js";
 
 const events = table(
   "events",
@@ -40,45 +40,26 @@ describe("clickhouse", () => {
   it.each(["base-univ3-weth-usdc", "bitcoin-wallets", "solana-wallet-hypersync"])("replays a shorter range from cached %s data", async (name) => {
     const fixture = readFixture(new URL(`./fixtures/${name}.json`, import.meta.url).pathname);
     const options = { blocksPerBatch: fixture.toBlock - fixture.fromBlock };
-    const fromBlock = Math.max(fixture.fromBlock, fixture.kind === "solana" ? fixture.firstBlock ?? 0 : 0);
-    let inner: Source;
-    let addresses: string[] = [];
-    let heights: number[];
     switch (fixture.kind) {
-      case "evm":
-        inner = fixtureSource(fixture, options);
-        heights = fixture.logs.map((l) => l.blockNumber);
-        break;
-      case "bitcoin":
-        inner = fixtureSource(fixture, options);
-        heights = fixture.transactions.map((t) => t.blockHeight);
-        addresses = fixture.transactions
+      case "evm": {
+        const query: EvmQuery = { fromBlock: fixture.fromBlock, toBlock: fixture.toBlock, logs: [{}], transactions: [], includeLogTransactions: true };
+        const heights = fixture.logs.map((l) => l.blockNumber);
+        return expectCachedReplay(name, fixtureSource(fixture, options), (source, toBlock) => source.fetch({ ...query, toBlock }), query, heights, (batch) => batch.logs);
+      }
+      case "bitcoin": {
+        const addresses = fixture.transactions
           .flatMap((t) => [...t.vin.map((i) => i.prevout?.address), ...t.vout.map((o) => o.address)])
           .filter((a): a is string => !!a);
-        break;
-      case "solana":
-        inner = fixtureSource(fixture, options);
-        addresses = fixture.balances.map(walletOf);
-        heights = fixture.transactions.map((t) => t.slot);
-        break;
+        const query: BitcoinQuery = { fromBlock: fixture.fromBlock, toBlock: fixture.toBlock, addresses: [...new Set(addresses)] };
+        const heights = fixture.transactions.map((t) => t.blockHeight);
+        return expectCachedReplay(name, fixtureSource(fixture, options), (source, toBlock) => source.fetch({ ...query, toBlock }), query, heights, (batch) => batch.transactions);
+      }
+      case "solana": {
+        const query: SolanaQuery = { fromBlock: Math.max(fixture.fromBlock, fixture.firstBlock ?? 0), toBlock: fixture.toBlock, addresses: [...new Set(fixture.balances.map(walletOf))] };
+        const heights = fixture.transactions.map((t) => t.slot);
+        return expectCachedReplay(name, fixtureSource(fixture, options), (source, toBlock) => source.fetch({ ...query, toBlock }), query, heights, (batch) => batch.transactions);
+      }
     }
-    const query = { fromBlock, toBlock: fixture.toBlock, addresses: [...new Set(addresses)], logs: [{}], transactions: [], includeLogTransactions: true };
-    const events: string[] = [];
-    const source = cached(inner, { db, chain: name, onEvent: (e) => events.push(e.type) });
-    const read = async (source: Source, toBlock: number) => {
-      const batches = [];
-      for await (const batch of source.fetch({ ...query, toBlock })) batches.push(batch);
-      return batches;
-    };
-    await read(source, fixture.toBlock);
-    events.length = 0;
-    const available = heights.filter((h) => h >= fromBlock);
-    const end = Math.floor((Math.min(...available) + Math.max(...available)) / 2);
-    const expected = await read(inner, end);
-    const batch = expected[0]!;
-    expect("logs" in batch ? batch.logs.length : batch.transactions.length).toBeGreaterThan(0);
-    expect(await read(source, end)).toEqual(expected);
-    expect(events).toEqual(["hit"]);
   });
 
   it("migrates, inserts and reads typed rows (with dedup on re-insert)", async () => {
@@ -193,3 +174,22 @@ describe("clickhouse", () => {
     expect(runs).toBe(3);
   });
 });
+
+/** Caches every batch of `query`, then reads a shorter range: one cache hit, equal to what `inner` serves, with rows. */
+async function expectCachedReplay<S extends Source, B extends RangeBatch>(chain: string, inner: S, fetch: (source: S, toBlock: number) => AsyncIterable<B>, query: RangeQuery, heights: number[], rowsOf: (batch: B) => unknown[]) {
+  const events: string[] = [];
+  const source = cached(inner, { db, chain, onEvent: (e) => events.push(e.type) });
+  const read = async (from: S, toBlock: number) => {
+    const batches: B[] = [];
+    for await (const batch of fetch(from, toBlock)) batches.push(batch);
+    return batches;
+  };
+  await read(source, query.toBlock);
+  events.length = 0;
+  const available = heights.filter((h) => h >= query.fromBlock);
+  const end = Math.floor((Math.min(...available) + Math.max(...available)) / 2);
+  const expected = await read(inner, end);
+  expect(rowsOf(expected[0]!).length).toBeGreaterThan(0);
+  expect(await read(source, end)).toEqual(expected);
+  expect(events).toEqual(["hit"]);
+}

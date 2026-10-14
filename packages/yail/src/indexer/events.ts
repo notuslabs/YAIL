@@ -1,6 +1,7 @@
 import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type ContractEventName, type DecodeEventLogReturnType } from "viem";
-import type { Config, EventFilter } from "../config/types.js";
-import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaTransaction } from "../sources/types.js";
+import type { Config, EventFilter, ProgramConfig } from "../config/types.js";
+import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction } from "../sources/types.js";
+import type { EventDef, InstructionDef } from "../solana/program.js";
 import { isAddressSet } from "../config/address.js";
 import { walletOf } from "../sources/solana/shared.js";
 import { toArray } from "../util.js";
@@ -9,6 +10,7 @@ import { toArray } from "../util.js";
 
 type ContractsOf<C extends Config<any, any, any>> = NonNullable<C["contracts"]>;
 type AccountsOf<C extends Config<any, any, any>> = NonNullable<C["accounts"]>;
+type ProgramsOf<C extends Config<any, any, any>> = NonNullable<C["programs"]>;
 
 export type ContractEventNames<C extends Config<any, any, any>> = {
   [K in keyof ContractsOf<C> & string]: `${K}:${ContractEventName<ContractsOf<C>[K]["abi"]>}`;
@@ -18,7 +20,11 @@ export type AccountEventNames<C extends Config<any, any, any>> = {
   [K in keyof AccountsOf<C> & string]: `${K}:transaction`;
 }[keyof AccountsOf<C> & string];
 
-export type EventNames<C extends Config<any, any, any>> = ContractEventNames<C> | AccountEventNames<C> | "setup";
+export type ProgramEventNames<C extends Config<any, any, any>> = {
+  [K in keyof ProgramsOf<C> & string]: `${K}:${(keyof NonNullable<ProgramsOf<C>[K]["instructions"]> | keyof NonNullable<ProgramsOf<C>[K]["events"]>) & string}`;
+}[keyof ProgramsOf<C> & string];
+
+export type EventNames<C extends Config<any, any, any>> = ContractEventNames<C> | AccountEventNames<C> | ProgramEventNames<C> | "setup";
 
 export interface ContractEvent<abi extends Abi = Abi, name extends string = string> {
   /** Event name as in the ABI. */
@@ -75,6 +81,47 @@ export interface SolanaAccountEvent {
   tokens: Array<{ account: string; mint: string; decimals: number; delta: bigint }>;
 }
 
+export interface SolanaInstructionEvent<args = unknown, account extends string = string> {
+  /** The instruction's key in the program config. */
+  name: string;
+  program: string;
+  /** Decoded with the definition's `args` codec, from the bytes after the discriminator. */
+  args: args;
+  /** The definition's account names, bound to the instruction's accounts in order. */
+  accounts: Record<account, string>;
+  /** Every account the instruction got, in order. */
+  accountList: string[];
+  /** Hex, without `0x`. */
+  data: string;
+  /** Position in the transaction: `[2]` is its third top-level instruction, `[2, 0]` the first inner one that one made. */
+  address: number[];
+  isInner: boolean;
+  /** Index of this instruction in `programInstructions`. */
+  ordinal: number;
+  /** The instructions of this program and this config entry in the transaction, by address. */
+  programInstructions: SolanaInstruction[];
+  /** With `includeLogs`: every log line this program wrote in the transaction, in order. Empty otherwise. */
+  programLogs: SolanaLog[];
+  transaction: SolanaTransaction;
+  block: SolanaBlock;
+  /** With `includeBalances`: every SOL and token balance change of the transaction. Empty otherwise. */
+  balances: SolanaBalance[];
+}
+
+export interface SolanaProgramEvent<data = unknown> {
+  /** The event's key in the program config. */
+  name: string;
+  program: string;
+  /** Decoded with the definition's `data` codec, from the bytes after the discriminator. */
+  data: data;
+  /** The instruction that emitted it. Null for a log line before slot 416,000,000, where HyperSync did not record it. */
+  address: number[] | null;
+  transaction: SolanaTransaction;
+  block: SolanaBlock;
+  /** With `includeBalances`: every SOL and token balance change of the transaction. Empty otherwise. */
+  balances: SolanaBalance[];
+}
+
 export interface SetupEvent {
   /** Block the chain starts (or resumes) indexing from. */
   block: number;
@@ -88,6 +135,16 @@ type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; 
 
 export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> = AccountEventByKind[ChainKind<C, AccountsOf<C>[K]["chain"]> & keyof AccountEventByKind];
 
+export type ProgramEventOf<P extends ProgramConfig<any, any>, E extends string> = E extends keyof NonNullable<P["instructions"]>
+  ? NonNullable<P["instructions"]>[E] extends InstructionDef<infer args, infer account>
+    ? SolanaInstructionEvent<args, account>
+    : never
+  : E extends keyof NonNullable<P["events"]>
+    ? NonNullable<P["events"]>[E] extends EventDef<infer data>
+      ? SolanaProgramEvent<data>
+      : never
+    : never;
+
 export type EventOf<C extends Config<any, any, any>, name extends string> = name extends "setup"
   ? SetupEvent
   : name extends `${infer K}:${infer E}`
@@ -95,7 +152,9 @@ export type EventOf<C extends Config<any, any, any>, name extends string> = name
       ? ContractEvent<ContractsOf<C>[K]["abi"], E>
       : K extends keyof AccountsOf<C>
         ? AccountEventOf<C, K>
-        : never
+        : K extends keyof ProgramsOf<C>
+          ? ProgramEventOf<ProgramsOf<C>[K], E>
+          : never
     : never;
 
 export type ChainNames<C extends Config<any, any, any>> = keyof C["chains"] & string;

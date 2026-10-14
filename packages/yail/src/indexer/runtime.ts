@@ -8,16 +8,19 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch, Source } from "../sources/types.js";
+import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
 import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
-import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent } from "./events.js";
-import { buildAddressQuery, buildEvmQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type QueryBuildOptions } from "./plan.js";
+import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
+import { buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
 import { toArray } from "../util.js";
+import { decode, type Codec } from "../solana/codec.js";
+import { EMIT_CPI_TAG, programData } from "../solana/program.js";
+import { compareAddress } from "../sources/solana/shared.js";
 
 export type Handler = (args: { event: any; context: HandlerContext<any, any> }) => Promise<void> | void;
 
@@ -36,12 +39,29 @@ export interface RuntimeDeps {
   onError?: "stop" | "skip";
 }
 
-interface DispatchEvent {
-  block: number;
-  txIndex: number;
-  logIndex: number;
+type DispatchPayload =
+  | { kind: "contract"; payload: ContractEvent }
+  | { kind: "evmAccount"; payload: EvmAccountEvent }
+  | { kind: "bitcoinAccount"; payload: BitcoinAccountEvent }
+  | { kind: "solanaAccount"; payload: SolanaAccountEvent }
+  | { kind: "solanaInstruction"; payload: SolanaInstructionEvent }
+  | { kind: "solanaProgram"; payload: SolanaProgramEvent };
+
+type DispatchEvent = { block: number; txIndex: number; logIndex: number; name: string } & DispatchPayload;
+
+/** A program event of one transaction, before ranking: by `position`, an instruction before the log lines it wrote. */
+interface ProgramHit {
+  position: number[];
+  isLogLine: boolean;
   name: string;
-  payload: ContractEvent | EvmAccountEvent | BitcoinAccountEvent | SolanaAccountEvent;
+  event: Extract<DispatchPayload, { kind: "solanaInstruction" | "solanaProgram" }>;
+}
+
+/** What every program event of one transaction shares. */
+interface TransactionContext {
+  transaction: SolanaTransaction;
+  block: SolanaBlock;
+  balances: SolanaBalance[];
 }
 
 /** Thrown by `step` when the loop is done (`once`, or past `endBlock`). */
@@ -276,6 +296,10 @@ export class ChainRunner {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
       empty = q.logs.length === 0 && q.transactions.length === 0;
+    } else if (source.kind === "solana") {
+      const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });
+      fetchBatches = () => source.fetch(q, { signal: options.signal });
+      empty = q.addresses.length + q.instructions.length + q.logs.length === 0;
     } else {
       const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
@@ -478,7 +502,7 @@ export class ChainRunner {
         const block = await this.blockOf(blocks, log.blockNumber);
         const payload: ContractEvent = { name: ev.name, args: decoded.args as any, address: log.address, log, block };
         if (c.includeTransactions) payload.transaction = txs.get(log.transactionHash);
-        events.push({ block: log.blockNumber, txIndex: log.transactionIndex, logIndex: log.logIndex + 1, name, payload });
+        events.push({ block: log.blockNumber, txIndex: log.transactionIndex, logIndex: log.logIndex + 1, name, kind: "contract", payload });
       }
     }
 
@@ -502,7 +526,7 @@ export class ChainRunner {
         const block = await this.blockOf(blocks, tx.blockNumber);
         for (const address of accounts) {
           const payload: EvmAccountEvent = { address, direction: directionOf(tx, address), transaction: tx, block, logs, traces };
-          events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, payload });
+          events.push({ block: tx.blockNumber, txIndex: tx.transactionIndex, logIndex: 0, name, kind: "evmAccount", payload });
         }
       }
     }
@@ -537,7 +561,7 @@ export class ChainRunner {
         let idx = 0;
         for (const address of touched) {
           const payload = bitcoinAccountEvent(tx, address);
-          if (payload) events.push({ block: tx.blockHeight, txIndex: hashIndex(tx.txid), logIndex: idx++, name, payload });
+          if (payload) events.push({ block: tx.blockHeight, txIndex: hashIndex(tx.txid), logIndex: idx++, name, kind: "bitcoinAccount", payload });
         }
       }
     }
@@ -548,6 +572,11 @@ export class ChainRunner {
 
   private async dispatchSolana(batch: SolanaBatch, context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter, override?: QueryBuildOptions["override"]): Promise<number> {
     const blocks = new Map(batch.blocks.map((b) => [b.slot, b]));
+    const blockOf = (slot: number): SolanaBlock => {
+      const block = blocks.get(slot);
+      if (!block) throw createError({ message: `slot ${slot} missing from ${this.plan.config.source.name} response`, why: "The source returned a transaction without its block", fix: "Check the source's field selection / fixture contents" });
+      return block;
+    };
     const balancesOf = groupBy(batch.balances, (b) => b.signature);
     const events: DispatchEvent[] = [];
     for (const a of this.plan.accounts) {
@@ -556,16 +585,102 @@ export class ChainRunner {
       const members = resolveAddresses(a.address, this.chain, this.deps.registry, override).addresses;
       for (const tx of batch.transactions) {
         if (tx.slot < a.startBlock || (a.endBlock !== undefined && tx.slot > a.endBlock)) continue;
-        const rows = balancesOf.get(tx.signature) ?? [];
-        const block = blocks.get(tx.slot);
-        if (!block) throw createError({ message: `slot ${tx.slot} missing from ${this.plan.config.source.name} response`, why: "The source returned a transaction without its block", fix: "Check the source's field selection / fixture contents" });
-        members.forEach((address, idx) => {
+        const rows = balancesOf.get(tx.signature);
+        if (!rows) continue;
+        const block = blockOf(tx.slot);
+        for (const address of members) {
           const payload = solanaAccountEvent(tx, block, rows, address);
-          if (payload) events.push({ block: tx.slot, txIndex: tx.transactionIndex, logIndex: idx, name, payload });
-        });
+          if (payload) events.push({ block: tx.slot, txIndex: tx.transactionIndex, logIndex: 0, name, kind: "solanaAccount", payload });
+        }
       }
     }
+    events.push(...this.solanaProgramEvents(batch, blockOf));
     return this.dispatch(events, context, meta, writer);
+  }
+
+  /**
+   * The program events of each transaction, ranked by address with an instruction before the log lines it wrote.
+   * The rank orders them after the transaction's wallet events (rank 0) and feeds the rows' version.
+   */
+  private solanaProgramEvents(batch: SolanaBatch, blockOf: (slot: number) => SolanaBlock): DispatchEvent[] {
+    if (this.plan.programs.length === 0) return [];
+    const instructionsOf = groupBy(batch.instructions, (i) => i.signature);
+    const logsOf = groupBy(batch.logs, (l) => l.signature);
+    const balancesOf = groupBy(batch.joinedBalances, (b) => b.signature);
+    const events: DispatchEvent[] = [];
+    for (const transaction of batch.transactions) {
+      const instructions = instructionsOf.get(transaction.signature) ?? [];
+      const logs = logsOf.get(transaction.signature) ?? [];
+      if (instructions.length + logs.length === 0) continue;
+      const block = blockOf(transaction.slot);
+      const hits: ProgramHit[] = [];
+      for (const p of this.plan.programs) {
+        if (transaction.slot < p.startBlock || (p.endBlock !== undefined && transaction.slot > p.endBlock)) continue;
+        const balances = p.includeBalances ? (balancesOf.get(transaction.signature) ?? []) : [];
+        const shared = { transaction, block, balances };
+        hits.push(...this.instructionHits(p, instructions, logs, shared), ...this.emittedHits(p, instructions, logs, shared));
+      }
+      hits.sort((a, b) => compareAddress(a.position, b.position) || Number(a.isLogLine) - Number(b.isLogLine));
+      hits.forEach((hit, rank) => events.push({ block: transaction.slot, txIndex: transaction.transactionIndex, logIndex: rank + 1, name: hit.name, ...hit.event }));
+    }
+    return events;
+  }
+
+  private instructionHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], shared: TransactionContext): ProgramHit[] {
+    if (p.instructions.length === 0) return [];
+    const matched = instructions.flatMap((instruction) => {
+      if (!p.addresses.includes(instruction.program) || isEventCpi(instruction)) return [];
+      const handled = p.instructions.find((i) => instruction.data.startsWith(i.def.discriminator));
+      if (!handled) return [];
+      return [{ instruction, handled }];
+    });
+    const hits: ProgramHit[] = [];
+    for (const [program, list] of groupBy(matched, (m) => m.instruction.program)) {
+      const programInstructions = list.map((m) => m.instruction);
+      const programLogs = p.includeLogs ? logs.filter((l) => l.program === program) : [];
+      for (const [ordinal, { instruction, handled }] of list.entries()) {
+        const name = `${p.name}:${handled.name}`;
+        const args = tryDecode(handled.def.args, Buffer.from(instruction.data.slice(handled.def.discriminator.length), "hex"));
+        const accounts = bindAccounts(handled.def.accounts, instruction.accounts);
+        if (!args || !accounts) {
+          this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, program: p.name, instruction: handled.name, tx: shared.transaction.signature, address: instruction.address });
+          continue;
+        }
+        const payload: SolanaInstructionEvent = { name: handled.name, program, args: args.value, accounts, accountList: instruction.accounts, data: instruction.data, address: instruction.address, isInner: instruction.isInner, ordinal, programInstructions, programLogs, ...shared };
+        hits.push({ position: instruction.address, isLogLine: false, name, event: { kind: "solanaInstruction", payload } });
+      }
+    }
+    return hits;
+  }
+
+  /** Events of `emit_cpi!` programs come from their self-CPI instructions, those of `emit!` programs from `Program data:` lines. */
+  private emittedHits(p: ProgramSource, instructions: SolanaInstruction[], logs: SolanaLog[], shared: TransactionContext): ProgramHit[] {
+    if (p.events.length === 0) return [];
+    if (p.emit === "cpi") {
+      return instructions.flatMap((i) => {
+        if (!p.addresses.includes(i.program) || !isEventCpi(i)) return [];
+        return this.programHit(p, shared, { payload: i.data.slice(EMIT_CPI_TAG.length), program: i.program, address: i.address.slice(0, -1), position: i.address, isLogLine: false });
+      });
+    }
+    return logs.flatMap((l) => {
+      if (l.kind !== "data" || !p.addresses.includes(l.program)) return [];
+      const payload = Buffer.from(programData(l.message)).toString("hex");
+      return this.programHit(p, shared, { payload, program: l.program, address: l.instructionAddress, position: l.instructionAddress ?? [], isLogLine: true });
+    });
+  }
+
+  /** The event an emitted `payload` (hex) holds, decoded; none when the program has no handler for it. */
+  private programHit(p: ProgramSource, shared: TransactionContext, emitted: { payload: string; program: string; address: number[] | null; position: number[]; isLogLine: boolean }): ProgramHit[] {
+    const { payload, program, address, position, isLogLine } = emitted;
+    const handled = p.events.find((e) => payload.startsWith(e.def.discriminator));
+    if (!handled) return [];
+    const name = `${p.name}:${handled.name}`;
+    const data = tryDecode(handled.def.data, Buffer.from(payload.slice(handled.def.discriminator.length), "hex"));
+    if (!data) {
+      this.deps.obs.log.warn({ event: "decode_failed", chain: this.chain, program: p.name, eventName: handled.name, tx: shared.transaction.signature, address });
+      return [];
+    }
+    return [{ position, isLogLine, name, event: { kind: "solanaProgram", payload: { name: handled.name, program, data: data.value, address, ...shared } } }];
   }
 
   // ------------------------------------------------------------ dispatch
@@ -615,13 +730,43 @@ function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: numbe
 }
 
 function describeEvent(e: DispatchEvent): Record<string, unknown> {
-  const p = e.payload;
-  if ("log" in p) return { block: e.block, tx: p.log.transactionHash, logIndex: p.log.logIndex, address: p.address };
-  if ("transaction" in p) {
-    const tx = p.transaction;
-    return { block: e.block, tx: "hash" in tx ? tx.hash : tx.signature, address: p.address };
+  switch (e.kind) {
+    case "contract":
+      return { block: e.block, tx: e.payload.log.transactionHash, logIndex: e.payload.log.logIndex, address: e.payload.address };
+    case "evmAccount":
+      return { block: e.block, tx: e.payload.transaction.hash, address: e.payload.address };
+    case "bitcoinAccount":
+      return { block: e.block, txid: e.payload.tx.txid, address: e.payload.address };
+    case "solanaAccount":
+      return { block: e.block, tx: e.payload.transaction.signature, address: e.payload.address };
+    case "solanaInstruction":
+    case "solanaProgram":
+      return { block: e.block, tx: e.payload.transaction.signature, program: e.payload.program, address: e.payload.address };
   }
-  return { block: e.block, txid: p.tx.txid, address: p.address };
+}
+
+/** An `emit_cpi!` event: an inner instruction carrying Anchor's event tag. */
+function isEventCpi(instruction: SolanaInstruction): boolean {
+  return instruction.isInner && instruction.data.startsWith(EMIT_CPI_TAG);
+}
+
+function tryDecode<T>(codec: Codec<T>, bytes: Uint8Array): { value: T } | null {
+  try {
+    return { value: decode(codec, bytes) };
+  } catch {
+    return null;
+  }
+}
+
+/** The instruction's accounts under the definition's names, or null when it got fewer accounts than named. */
+function bindAccounts(names: readonly string[], accounts: string[]): Record<string, string> | null {
+  const bound: Record<string, string> = {};
+  for (const [index, name] of names.entries()) {
+    const account = accounts[index];
+    if (account === undefined) return null;
+    bound[name] = account;
+  }
+  return bound;
 }
 
 function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {

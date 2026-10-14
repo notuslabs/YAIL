@@ -1,8 +1,8 @@
 /**
  * Records real on-chain data into test/fixtures/*.json together with ground
  * truth read from the chain at the same blocks. Re-run to refresh:
- *   pnpm tsx scripts/record-fixtures.ts [pool|usdc|bitcoin|solana]
- * `solana` needs ENVIO_API_TOKEN (HyperSync); SOLANA_RPC_URL defaults to the public mainnet RPC.
+ *   pnpm tsx scripts/record-fixtures.ts [pool|usdc|bitcoin|solana|clmm|ammv4]
+ * `solana`, `clmm` and `ammv4` need ENVIO_API_TOKEN (HyperSync); SOLANA_RPC_URL defaults to the public mainnet RPC.
  */
 import { createPublicClient, http, parseAbi, toEventSelector } from "viem";
 import { rpc } from "../src/sources/rpc.js";
@@ -11,6 +11,8 @@ import { TOKEN_PROGRAMS } from "../src/sources/solana/rpc.js";
 import { esplora } from "../src/sources/esplora.js";
 import { recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture } from "../src/sources/fixture.js";
 import { padAddress } from "../src/indexer/events.js";
+import { anchorDiscriminator, b, base58Encode, decode, programData } from "../src/solana/index.js";
+import type { SolanaQuery } from "../src/sources/types.js";
 
 const BASE_RPC = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
 const ESPLORA = process.env.ESPLORA_URL ?? "https://mempool.space/api";
@@ -18,6 +20,9 @@ const SOLANA_RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solan
 const SOLANA_WALLET = process.env.SOLANA_WALLET ?? "8dVSpuXXqZmvsTJbTTut7acjhxUmknABHR6RhSkPNawV"; // a few hundred txs since 2026-10-01, ~50 tokens
 const POOL = "0xd0b53d9277642d899df5c87a3966a349a798f224"; // Uniswap V3 WETH/USDC 0.05% on Base
 const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const RAYDIUM_CLMM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+const RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+const AMM_V4_RANGE = { from: 391_100_000, to: 391_100_060 }; // before slot 416M: HyperSync log lines carry no instruction address
 const POOL_RANGE = { from: 51_800_000, to: 51_800_150 };
 const USDC_RANGE = { from: 51_800_000, to: 51_800_060 };
 
@@ -150,28 +155,22 @@ async function recordBitcoin() {
  * the summed changes against the balances read from the chain at `expected.slot`.
  */
 async function recordSolana() {
-  const call = async <T>(method: string, params: unknown[]): Promise<T> => {
-    const r = await fetch(SOLANA_RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-    const body = (await r.json()) as { result?: T; error?: unknown };
-    if (!body.result) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
-    return body.result;
-  };
-  const sigs = await call<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1000 }]);
+  const sigs = await solanaRpc<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1000 }]);
   if (sigs.length === 1000) throw new Error("pick a wallet with fewer than 1000 transactions");
   const first = sigs.at(-1)!.slot;
   // SOL and every open token account. The reads land on different slots: they agree when the wallet did nothing in between.
-  const balance = await call<{ context: { slot: number }; value: number }>("getBalance", [SOLANA_WALLET, { commitment: "confirmed" }]);
+  const balance = await solanaRpc<{ context: { slot: number }; value: number }>("getBalance", [SOLANA_WALLET, { commitment: "confirmed" }]);
   const slot = balance.context.slot;
   if (sigs[0]!.slot >= slot) throw new Error("the wallet just moved: run again");
   const tokens: Record<string, { mint: string; amount: bigint }> = {};
   for (const programId of TOKEN_PROGRAMS) {
-    const res = await call<{ context: { slot: number }; value: Array<{ pubkey: string; account: { data: { parsed: { info: { mint: string; tokenAmount: { amount: string } } } } } }> }>(
+    const res = await solanaRpc<{ context: { slot: number }; value: Array<{ pubkey: string; account: { data: { parsed: { info: { mint: string; tokenAmount: { amount: string } } } } } }> }>(
       "getTokenAccountsByOwner",
       [SOLANA_WALLET, { programId }, { encoding: "jsonParsed", commitment: "confirmed", minContextSlot: slot }],
     );
     for (const a of res.value) tokens[a.pubkey] = { mint: a.account.data.parsed.info.mint, amount: BigInt(a.account.data.parsed.info.tokenAmount.amount) };
   }
-  const [latest] = await call<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1 }]);
+  const [latest] = await solanaRpc<Array<{ slot: number }>>("getSignaturesForAddress", [SOLANA_WALLET, { limit: 1 }]);
   if (latest!.slot !== sigs[0]!.slot) throw new Error("the wallet moved while its balances were read: run again");
   const hs = hypersync({ kind: "solana", concurrency: 32 });
   while ((await hs.getHeight()) <= slot) await new Promise((r) => setTimeout(r, 2000));
@@ -187,8 +186,62 @@ async function recordSolana() {
   console.log(`solana: ${fixture.transactions.length} txs (${early.transactions.length} over RPC below ${floor}), ${Object.keys(tokens).length} token accounts, slot ${slot}`);
 }
 
+/**
+ * ~200 slots of Raydium CLMM events near the head, plus each pool's `PoolState` read over RPC afterwards. A pool is kept
+ * as ground truth only when no CLMM instruction touched it between its last swap and the read: its price and liquidity
+ * then still are what that swap left.
+ */
+async function recordRaydiumClmm() {
+  const hs = hypersync({ kind: "solana", concurrency: 4 });
+  const toBlock = (await hs.getHeight()) - 40;
+  const query: SolanaQuery = { fromBlock: toBlock - 200, toBlock, addresses: [], logs: [{ programs: [RAYDIUM_CLMM], kinds: ["data"], balances: false }] };
+  const fixture = await recordSolanaFixture(hs, query, { name: "solana-raydium-clmm" });
+  const swapEvent = anchorDiscriminator("event", "SwapEvent");
+  const lastSwap = new Map<string, string>();
+  for (const log of fixture.logs ?? []) {
+    const bytes = programData(log.message);
+    if (Buffer.from(bytes.subarray(0, 8)).toString("hex") === swapEvent) lastSwap.set(base58Encode(bytes.subarray(8, 40)), log.signature);
+  }
+  const pools = [...lastSwap.keys()].slice(0, 100);
+  const accounts = await solanaRpc<{ context: { slot: number }; value: Array<{ data: [string, string] } | null> }>("getMultipleAccounts", [pools, { encoding: "base64", commitment: "confirmed" }]);
+  const readSlot = accounts.context.slot;
+  while ((await hs.getHeight()) <= readSlot + 40) await pause(2000);
+  const touched = await recordSolanaFixture(hs, { fromBlock: query.fromBlock, toBlock: readSlot + 1, addresses: [], instructions: [{ programs: [RAYDIUM_CLMM], discriminators: [], logKinds: [], balances: false }] });
+  const lastTouch = new Map<string, string>();
+  for (const i of touched.instructions ?? []) for (const account of i.accounts) lastTouch.set(account, i.signature);
+  const expected: Record<string, { sqrtPriceX64: bigint; liquidity: bigint }> = {};
+  pools.forEach((pool, n) => {
+    const account = accounts.value[n];
+    if (!account || lastTouch.get(pool) !== lastSwap.get(pool)) return;
+    const data = Buffer.from(account.data[0], "base64");
+    expected[pool] = { liquidity: decode(b.u128, data.subarray(237)), sqrtPriceX64: decode(b.u128, data.subarray(253)) };
+  });
+  if (Object.keys(expected).length < 10) throw new Error(`only ${Object.keys(expected).length} pools stayed idle until the read: run again`);
+  fixture.expected = { program: RAYDIUM_CLMM, readSlot, pools: expected };
+  writeFixture(`${out}solana-raydium-clmm.json`, fixture);
+  console.log(`clmm: ${fixture.logs?.length} log lines in slots ${query.fromBlock}-${toBlock - 1}, ${Object.keys(expected).length} of ${pools.length} pools idle until slot ${readSlot}`);
+}
+
+/** Raydium AMM v4 swap instructions with the program's log lines (its `ray_log` per swap), in an era without log instruction addresses. */
+async function recordRaydiumAmmV4() {
+  const hs = hypersync({ kind: "solana", concurrency: 4 });
+  const query: SolanaQuery = { fromBlock: AMM_V4_RANGE.from, toBlock: AMM_V4_RANGE.to, addresses: [], instructions: [{ programs: [RAYDIUM_AMM_V4], discriminators: ["09", "0b", "10", "11"], logKinds: ["log", "data"], balances: false }] };
+  const fixture = await recordSolanaFixture(hs, query, { name: "solana-raydium-amm-v4" });
+  writeFixture(`${out}solana-raydium-amm-v4.json`, fixture);
+  console.log(`ammv4: ${fixture.instructions?.length} swaps and ${fixture.logs?.length} log lines in ${fixture.transactions.length} transactions`);
+}
+
+async function solanaRpc<T>(method: string, params: unknown[]): Promise<T> {
+  const r = await fetch(SOLANA_RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const body = (await r.json()) as { result?: T; error?: unknown };
+  if (!body.result) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
+  return body.result;
+}
+
 const which = process.argv[2];
 if (!which || which === "pool") await recordPool();
 if (!which || which === "usdc") await recordUsdc();
 if (!which || which === "bitcoin") await recordBitcoin();
 if (!which || which === "solana") await recordSolana();
+if (!which || which === "clmm") await recordRaydiumClmm();
+if (!which || which === "ammv4") await recordRaydiumAmmV4();

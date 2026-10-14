@@ -2,7 +2,8 @@ import type { Abi, AbiEvent } from "viem";
 import type { AddressSpec, ChainConfig, Config } from "../config/types.js";
 import { factorySetName, isAddressSet, isFactory, type FactoryRef } from "../config/address.js";
 import type { AddressRegistry } from "../addresses/registry.js";
-import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter, SolanaQuery, SourceKind } from "../sources/types.js";
+import type { BitcoinQuery, EvmLogFilter, EvmQuery, EvmTraceFilter, EvmTxFilter, SolanaInstructionFilter, SolanaLogFilter, SolanaQuery, SourceKind } from "../sources/types.js";
+import { EMIT_CPI_TAG, type EventDef, type InstructionDef } from "../solana/program.js";
 import { abiEvents, compileFilter, eventTopic, padAddress, type CompiledEvent, type CompiledFilter } from "./events.js";
 import { perChain } from "../config/chain-ref.js";
 import { chunkList, normalizeHex, toArray } from "../util.js";
@@ -32,12 +33,30 @@ export interface AccountSource {
   activity: boolean;
 }
 
+export interface ProgramSource {
+  kind: "program";
+  name: string;
+  chain: string;
+  /** Program ids. */
+  addresses: string[];
+  startBlock: number;
+  endBlock?: number;
+  /** Instructions that have at least one handler, longest discriminator first. */
+  instructions: Array<{ name: string; def: InstructionDef }>;
+  /** Events that have at least one handler. */
+  events: Array<{ name: string; def: EventDef }>;
+  emit: "log" | "cpi";
+  includeLogs: boolean;
+  includeBalances: boolean;
+}
+
 export interface ChainPlan {
   chain: string;
   config: ChainConfig;
   kind: SourceKind;
   contracts: ContractSource[];
   accounts: AccountSource[];
+  programs: ProgramSource[];
   /** Earliest block any source starts at. */
   startBlock: number;
   /** Set when every source has an endBlock. */
@@ -55,7 +74,7 @@ export interface PlanOptions {
 export function buildPlans(config: Config, options: PlanOptions): Map<string, ChainPlan> {
   const plans = new Map<string, ChainPlan>();
   for (const [chain, cfg] of Object.entries(config.chains)) {
-    plans.set(chain, { chain, config: cfg, kind: cfg.source.kind, contracts: [], accounts: [], startBlock: Number.MAX_SAFE_INTEGER, sets: new Map() });
+    plans.set(chain, { chain, config: cfg, kind: cfg.source.kind, contracts: [], accounts: [], programs: [], startBlock: Number.MAX_SAFE_INTEGER, sets: new Map() });
   }
   const resolveBlock = (chain: string, v: number | "latest" | undefined, fallback: number): number => {
     if (v === "latest") return options.resolveLatest(chain);
@@ -64,7 +83,8 @@ export function buildPlans(config: Config, options: PlanOptions): Map<string, Ch
 
   for (const [name, c] of Object.entries(config.contracts ?? {})) {
     for (const [chain, override] of Object.entries(perChain(c.chain))) {
-      const plan = plans.get(chain)!;
+      const plan = plans.get(chain);
+      if (!plan) continue;
       if (plan.kind !== "evm") throw new Error(`contract "${name}": chain "${chain}" is not an EVM chain`);
       const events = abiEvents(c.abi)
         .filter((e) => options.handled.has(`${name}:${e.name}`))
@@ -90,7 +110,8 @@ export function buildPlans(config: Config, options: PlanOptions): Map<string, Ch
   for (const [name, a] of Object.entries(config.accounts ?? {})) {
     if (!options.handled.has(`${name}:transaction`)) continue;
     for (const [chain, override] of Object.entries(perChain(a.chain))) {
-      const plan = plans.get(chain)!;
+      const plan = plans.get(chain);
+      if (!plan) continue;
       const address = override.address ?? a.address;
       const startBlock = resolveBlock(chain, override.startBlock ?? a.startBlock, 0);
       const endBlock = override.endBlock ?? a.endBlock;
@@ -101,9 +122,31 @@ export function buildPlans(config: Config, options: PlanOptions): Map<string, Ch
     }
   }
 
+  for (const [name, p] of Object.entries(config.programs ?? {})) {
+    for (const [chain, override] of Object.entries(perChain(p.chain))) {
+      const plan = plans.get(chain);
+      if (!plan) continue;
+      if (plan.kind !== "solana") throw new Error(`program "${name}": chain "${chain}" is not a Solana chain`);
+      const instructions = Object.entries<InstructionDef>(p.instructions ?? {})
+        .filter(([key]) => options.handled.has(`${name}:${key}`))
+        .map(([key, def]) => ({ name: key, def }))
+        .sort((a, b) => b.def.discriminator.length - a.def.discriminator.length);
+      const events = Object.entries<EventDef>(p.events ?? {})
+        .filter(([key]) => options.handled.has(`${name}:${key}`))
+        .map(([key, def]) => ({ name: key, def }));
+      if (instructions.length + events.length === 0) continue;
+      const startBlock = resolveBlock(chain, override.startBlock ?? p.startBlock, 0);
+      const endBlock = override.endBlock ?? p.endBlock;
+      const addresses = toArray(override.address ?? p.address);
+      plan.programs.push({ kind: "program", name, chain, addresses, startBlock, endBlock, instructions, events, emit: p.emit ?? "log", includeLogs: p.includeLogs ?? false, includeBalances: p.includeBalances ?? false });
+      plan.startBlock = Math.min(plan.startBlock, startBlock);
+      plan.endBlock = mergeEnd(plan, endBlock);
+    }
+  }
+
   for (const plan of plans.values()) {
     if (plan.startBlock === Number.MAX_SAFE_INTEGER) plan.startBlock = 0;
-    if (plan.contracts.length + plan.accounts.length === 0) plan.endBlock = undefined;
+    if (plan.contracts.length + plan.accounts.length + plan.programs.length === 0) plan.endBlock = undefined;
   }
   return plans;
 }
@@ -114,7 +157,7 @@ function noteSet(plan: ChainPlan, set: string, startBlock: number): void {
 
 function mergeEnd(plan: ChainPlan, end: number | undefined): number | undefined {
   // Only meaningful when every source has an endBlock; any open-ended source makes the chain open-ended.
-  const sources = [...plan.contracts, ...plan.accounts];
+  const sources = [...plan.contracts, ...plan.accounts, ...plan.programs];
   if (sources.some((s) => s.endBlock === undefined)) return undefined;
   return Math.max(plan.endBlock ?? 0, end ?? 0);
 }
@@ -122,7 +165,7 @@ function mergeEnd(plan: ChainPlan, end: number | undefined): number | undefined 
 /** Next block at which the set of active sources changes (a later startBlock or an endBlock). */
 export function nextBoundary(plan: ChainPlan, from: number): number | undefined {
   let next: number | undefined;
-  for (const s of [...plan.contracts, ...plan.accounts]) {
+  for (const s of [...plan.contracts, ...plan.accounts, ...plan.programs]) {
     const boundaries = [s.startBlock];
     if (s.endBlock !== undefined) boundaries.push(s.endBlock + 1);
     for (const b of boundaries) {
@@ -237,7 +280,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   return { fromBlock: from, toBlock: to, logs, transactions, traces, includeLogTransactions, join };
 }
 
-/** Bitcoin and Solana queries: the addresses of every account source active in the range. */
+/** Bitcoin queries, and the wallets of Solana ones: the addresses of every account source active in the range. */
 export function buildAddressQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery & SolanaQuery {
   const addresses = new Set<string>();
   for (const a of plan.accounts) {
@@ -248,6 +291,26 @@ export function buildAddressQuery(plan: ChainPlan, from: number, to: number, reg
     for (const x of resolved.addresses) addresses.add(x);
   }
   return { fromBlock: from, toBlock: to, addresses: [...addresses] };
+}
+
+/**
+ * Solana queries: the wallets of every account source and the selections of every program active in the range.
+ * Address backfills (`override`) only ask for wallets: programs have no address history to fill.
+ */
+export function buildSolanaQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): Required<SolanaQuery> {
+  const { addresses } = buildAddressQuery(plan, from, to, registry, options);
+  const instructions: SolanaInstructionFilter[] = [];
+  const logs: SolanaLogFilter[] = [];
+  for (const p of plan.programs) {
+    if (options.override || !(p.startBlock < to && (p.endBlock === undefined || p.endBlock >= from))) continue;
+    if (p.instructions.length > 0) {
+      instructions.push({ programs: p.addresses, discriminators: p.instructions.map((i) => i.def.discriminator), logKinds: p.includeLogs ? ["log", "data"] : [], balances: p.includeBalances });
+    }
+    if (p.events.length === 0) continue;
+    if (p.emit === "cpi") instructions.push({ programs: p.addresses, discriminators: [EMIT_CPI_TAG], isInner: true, logKinds: [], balances: p.includeBalances });
+    else logs.push({ programs: p.addresses, kinds: ["data"], balances: p.includeBalances });
+  }
+  return { fromBlock: from, toBlock: to, addresses, instructions, logs };
 }
 
 function cartesian<T>(lists: T[][]): T[][] {

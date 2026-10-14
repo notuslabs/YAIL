@@ -49,6 +49,9 @@ interface RawTransaction {
  * ones come from `getTokenAccountsByOwner`. A closed one shows up in the transaction that closed it, which needs the
  * owner's signature: the wallet's transactions from the range's start up to the head name every account that existed
  * in the range. Those past the range are read only for that, and remembered.
+ *
+ * Program instructions and log lines are not served: a query for them throws, so a program that starts below
+ * HyperSync's first slot fails loudly instead of indexing nothing.
  */
 export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
   const doFetch = options.fetch ?? fetch;
@@ -114,6 +117,9 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
       return call<number>("getSlot", [{ commitment: "confirmed" }]);
     },
     async *fetch(query: SolanaQuery, fetchOptions?: FetchOptions) {
+      if (query.instructions?.length || query.logs?.length) {
+        throw new Error(`rpc({ kind: "solana" }): program instructions and logs need hypersync({ kind: "solana" }); start the program at or above its first slot (slots ${query.fromBlock}-${query.toBlock - 1} were asked)`);
+      }
       const signal = fetchOptions?.signal;
       const wallets = new Set(query.addresses);
       const inRange = (slot: number) => slot >= query.fromBlock && slot < query.toBlock;
@@ -169,5 +175,5 @@ function toBatch(raws: RawTransaction[], wallets: Set<string>, owners: Map<strin
       if (wallets.has(walletOf(row))) balances.push(row);
     });
   }
-  return { fromBlock: query.fromBlock, nextBlock: query.toBlock, blocks: [...blocks.values()], transactions, balances };
+  return { fromBlock: query.fromBlock, nextBlock: query.toBlock, blocks: [...blocks.values()], transactions, balances, instructions: [], logs: [], joinedBalances: [] };
 }

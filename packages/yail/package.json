@@ -48,6 +48,10 @@
       "types": "./dist/observability/otel.d.ts",
       "default": "./dist/observability/otel.js"
     },
+    "./solana": {
+      "types": "./dist/solana/index.d.ts",
+      "default": "./dist/solana/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

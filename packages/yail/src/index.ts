@@ -1,6 +1,6 @@
 // Config
 export { createConfig, addressSet, factory } from "./config/index.js";
-export type { Config, ChainConfig, ContractConfig, AccountConfig, EventFilter, AddressSpec, AddressSetRef, FactoryRef, CacheConfig, ObservabilityConfig, ServerConfig, IndexingConfig, AddressSetConfig } from "./config/index.js";
+export type { Config, ChainConfig, ContractConfig, AccountConfig, ProgramConfig, EventFilter, AddressSpec, AddressSetRef, FactoryRef, CacheConfig, ObservabilityConfig, ServerConfig, IndexingConfig, AddressSetConfig } from "./config/index.js";
 
 // Schema + database
 export { t, table, materializedView, view, tableDdl, materializedViewDdl, viewDdl } from "./schema/index.js";
@@ -10,7 +10,7 @@ export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index
 
 // Sources
 export { hypersync, rpc, cached, esplora, union, fixtureSource } from "./sources/index.js";
-export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
+export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, SolanaInstruction, SolanaLog, SolanaInstructionFilter, SolanaLogFilter, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";
@@ -18,7 +18,7 @@ export type { CacheStore, CacheKey, CacheQuery } from "./cache/cached.js";
 export { memory, redis } from "./cache/stores.js";
 export type { Indexer, IndexerOptions, StatusSnapshot, ReindexRequest } from "./indexer/indexer.js";
 export type { HandlerContext, HandlerDb, AddressesApi } from "./indexer/context.js";
-export type { ContractEvent, EvmAccountEvent, BitcoinAccountEvent, SolanaAccountEvent, SetupEvent, EventNames, EventOf } from "./indexer/events.js";
+export type { ContractEvent, EvmAccountEvent, BitcoinAccountEvent, SolanaAccountEvent, SolanaInstructionEvent, SolanaProgramEvent, SetupEvent, EventNames, EventOf } from "./indexer/events.js";
 export type { HttpClient, HttpResponse, HttpRequestInit, HttpCacheOptions } from "./http/client.js";
 export type { CachedClient, ReadContractParams } from "./rpc/cached-client.js";
 export type { AddressRow, AddressStatus } from "./addresses/registry.js";

@@ -3,7 +3,7 @@ import type { Db } from "../db/client.js";
 import { sql } from "../db/sql.js";
 import { sourceCache } from "../db/internal.js";
 import { normalizeHex } from "../util.js";
-import type { BatchOf, BitcoinSource, EvmSource, FetchOptions, QueryOf, RangeQuery, Source } from "./types.js";
+import type { BatchByKind, BatchOf, BitcoinSource, EvmSource, FetchOptions, QueryOf, RangeQuery, Source, SourceKind } from "./types.js";
 
 export interface CachedSourceOptions {
   db: Db;
@@ -50,7 +50,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
             const batch = reviveBatch(payload) as BatchOf<S>;
             const next = Math.min(batch.nextBlock, query.toBlock);
             options.onEvent?.({ type: "hit", fromBlock: cursor, nextBlock: next });
-            yield clampBatch(batch, next);
+            yield clampBatch<S["kind"]>(inner.kind, batch, next);
             cursor = next;
             continue;
           }
@@ -115,28 +115,34 @@ function untagBigint(_key: string, value: unknown): unknown {
   return value;
 }
 
-function clampBatch<B extends BatchOf<Source>>(batch: B, next: number): B {
+const clamp: { [K in SourceKind]: (batch: BatchByKind[K], next: number) => BatchByKind[K] } = {
+  evm: (batch, next) => ({
+    ...batch,
+    nextBlock: next,
+    blocks: batch.blocks.filter((b) => b.number < next),
+    transactions: batch.transactions.filter((t) => t.blockNumber < next),
+    logs: batch.logs.filter((l) => l.blockNumber < next),
+    ...(batch.traces ? { traces: batch.traces.filter((t) => t.blockNumber < next) } : {}),
+  }),
+  solana: (batch, next) => {
+    const before = (row: { slot: number }) => row.slot < next;
+    return {
+      ...batch,
+      nextBlock: next,
+      blocks: batch.blocks.filter(before),
+      transactions: batch.transactions.filter(before),
+      balances: batch.balances.filter(before),
+      instructions: batch.instructions.filter(before),
+      logs: batch.logs.filter(before),
+      joinedBalances: batch.joinedBalances.filter(before),
+    };
+  },
+  bitcoin: (batch, next) => ({ ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) }),
+};
+
+function clampBatch<K extends SourceKind>(kind: K, batch: BatchByKind[K], next: number): BatchByKind[K] {
   if (batch.nextBlock === next) return batch;
-  if ("logs" in batch) {
-    return {
-      ...batch,
-      nextBlock: next,
-      blocks: batch.blocks.filter((b) => b.number < next),
-      transactions: batch.transactions.filter((t) => t.blockNumber < next),
-      logs: batch.logs.filter((l) => l.blockNumber < next),
-      ...(batch.traces ? { traces: batch.traces.filter((t) => t.blockNumber < next) } : {}),
-    };
-  }
-  if ("balances" in batch) {
-    return {
-      ...batch,
-      nextBlock: next,
-      blocks: batch.blocks.filter((b) => b.slot < next),
-      transactions: batch.transactions.filter((t) => t.slot < next),
-      balances: batch.balances.filter((b) => b.slot < next),
-    };
-  }
-  return { ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) };
+  return clamp[kind](batch, next);
 }
 
 export type { EvmSource, BitcoinSource };
