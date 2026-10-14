@@ -204,4 +204,11 @@ describe("config validation", () => {
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: src } }, contracts: { A: { abi: erc20, chain: "nope" } } })).toThrow(/unknown chain "nope"/);
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: src } }, contracts: { A: { abi: erc20, chain: "base", filter: { event: "Transfer", args: { value: 1 } } } } })).toThrow(/must be indexed/);
   });
+
+  it("rejects a backfillSource of another kind than source", () => {
+    const evm = fixtureSource({ version: 1, kind: "evm", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], logs: [] });
+    const solana = fixtureSource({ version: 1, kind: "solana", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], balances: [] });
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: solana } } })).toThrow(/backfillSource .* is a solana source, source .* is evm/);
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: evm } } })).not.toThrow();
+  });
 });

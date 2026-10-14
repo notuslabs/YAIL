@@ -158,7 +158,7 @@ export class JobRunner {
 
   private async backfillAddress(p: BackfillAddressPayload): Promise<void> {
     await this.deps.registry.update(p.set, this.chain, p.address, { status: "backfilling" });
-    await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: [p.address] }, label: "backfill" });
+    await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: [p.address] }, label: "backfill", source: this.runner.plan.config.backfillSource });
     await this.deps.registry.update(p.set, this.chain, p.address, { status: "live", error: "" });
   }
 

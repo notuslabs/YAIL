@@ -8,7 +8,7 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch } from "../sources/types.js";
+import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
@@ -58,6 +58,8 @@ export interface ProcessRangeOptions {
   backfill: boolean;
   signal?: AbortSignal;
   label?: string;
+  /** Where the range is read from. Default: the chain's `source`. */
+  source?: Source;
 }
 
 export class ChainRunner {
@@ -257,7 +259,7 @@ export class ChainRunner {
     const { metrics, log } = this.deps.obs;
     const stats = { batches: 0, events: 0 };
     if (from >= to) return stats;
-    const source = this.plan.config.source;
+    const source = options.source ?? this.plan.config.source;
     const addressChunk = this.deps.config.indexing?.addressChunk ?? 500;
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;

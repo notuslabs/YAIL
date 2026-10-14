@@ -93,6 +93,12 @@ solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind:
 
 Recent slots come from HyperSync (a range scan: cheap per wallet set, any number of wallets), older ones from RPC (per address: cheap for the rare wallet with old history). Address backfills fetch their whole range in one go, so the RPC pages each wallet once. Solana HyperSync finds where its history starts with one-slot probes that match nothing (a binary search the first time, then one probe per hour, since the floor only moves down). The head is the first source's.
 
+A chain's `backfillSource` is where address history is read: `backfill_address` and `reindex_scope` jobs fetch through it, the live loop and `reindex_range` through `source`. It must be of the same kind as `source`, defaults to `source`, and `cache.source` wraps it too. A HyperSync scan costs its block range whatever the number of wallets, so one new Solana wallet's history is cheaper over RPC:
+
+```ts
+solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind: "solana", url })), backfillSource: rpc({ kind: "solana", url }) },
+```
+
 The runtime only ever indexes blocks `<= head - finality` (default 20 blocks on EVM, 3 on Bitcoin, 32 slots on Solana), so reorgs are a non-issue in practice. HyperSync's rollback guard is still checked; on a mismatch the last window is re-indexed automatically.
 
 ### Schema

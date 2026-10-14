@@ -7,6 +7,8 @@ import { fixtureSource } from "../src/sources/fixture.js";
 import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
 import { internalTables } from "../src/db/index.js";
+import type { DatabaseConfig } from "../src/db/client.js";
+import type { EvmQuery, EvmSource } from "../src/sources/types.js";
 import { FixtureBuilder, addr } from "./helpers.js";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
@@ -29,8 +31,8 @@ const W2 = addr(0x2);
 const W3 = addr(0x3);
 const OTHER = addr(0x9);
 
-function buildFixture() {
-  const fb = new FixtureBuilder(120);
+function buildFixture(height = 120) {
+  const fb = new FixtureBuilder(height);
   fb.transfer(5, TOKEN, OTHER, W1, 100n);
   fb.transfer(10, TOKEN, W1, W2, 40n);
   fb.transfer(20, TOKEN, OTHER, W3, 7n); // W3 registered later -> must be backfilled
@@ -53,10 +55,10 @@ beforeAll(async () => {
   ch = await startTestClickHouse();
 });
 
-function makeIndexer(database: ReturnType<TestClickHouse["database"]>, opts: { fixture: ReturnType<typeof buildFixture>; cacheSource?: boolean; withFactory?: boolean }) {
+function makeIndexer(database: DatabaseConfig, opts: { fixture: ReturnType<typeof buildFixture>; source?: EvmSource; backfillSource?: EvmSource; cacheSource?: boolean; withFactory?: boolean }) {
   const config = createConfig({
     database,
-    chains: { test: { id: 1337, source: fixtureSource(opts.fixture, { blocksPerBatch: 25 }), finality: 10, pollInterval: 10 } },
+    chains: { test: { id: 1337, source: opts.source ?? fixtureSource(opts.fixture, { blocksPerBatch: 25 }), backfillSource: opts.backfillSource, finality: 10, pollInterval: 10 } },
     addressSets: { wallets: { initial: [W1, W2] } },
     contracts: {
       Token: { abi: erc20, chain: "test", address: TOKEN, startBlock: 0, filter: [{ event: "Transfer", args: { from: addressSet("wallets") } }, { event: "Transfer", args: { to: addressSet("wallets") } }] },
@@ -91,6 +93,29 @@ function makeIndexer(database: ReturnType<TestClickHouse["database"]>, opts: { f
     });
   }
   return { indexer, seen };
+}
+
+/** A database the indexer has run to the fixture's finalized head (cursor 111), with W1 and W2 seeded. */
+async function caughtUp(): Promise<DatabaseConfig> {
+  const database = ch.database();
+  const { indexer } = makeIndexer(database, { fixture: buildFixture() });
+  await indexer.run();
+  await indexer.db.close();
+  return database;
+}
+
+function recorded(source: EvmSource): { source: EvmSource; queries: EvmQuery[] } {
+  const queries: EvmQuery[] = [];
+  return {
+    queries,
+    source: {
+      ...source,
+      fetch: (query, options) => {
+        queries.push(query);
+        return source.fetch(query, options);
+      },
+    },
+  };
 }
 
 async function balances(indexer: ReturnType<typeof makeIndexer>["indexer"]) {
@@ -276,5 +301,23 @@ describe("indexer end-to-end (synthetic fixture)", () => {
     expect(second.indexer.observability.metrics.counters.cacheHits).toBeGreaterThan(0);
     await second.indexer.db.close();
     await first.indexer.db.close();
+  });
+});
+
+describe("backfillSource", () => {
+  it("reads a registered wallet's history from backfillSource and live ranges from source", async () => {
+    const database = await caughtUp();
+    const fixture = buildFixture(140);
+    const live = recorded(fixtureSource(fixture, { blocksPerBatch: 25 }));
+    const history = recorded(fixtureSource(fixture, { blocksPerBatch: 25 }));
+    const { indexer } = makeIndexer(database, { fixture, source: live.source, backfillSource: history.source });
+    await indexer.init();
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    await indexer.run();
+    expect(history.queries.map((q) => [q.fromBlock, q.toBlock, q.transactions])).toEqual([[0, 111, [{ from: [W3] }, { to: [W3] }]]]);
+    expect(live.queries.length).toBeGreaterThan(0);
+    expect(live.queries.filter((q) => q.fromBlock < 111)).toEqual([]);
+    expect((await balances(indexer))[W3]).toEqual({ total: 5n, n: 2 });
+    await indexer.db.close();
   });
 });

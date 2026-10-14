@@ -11,6 +11,11 @@ export interface ChainConfig<S extends Source = Source> {
   id: number | string;
   /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `esplora()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
   source: S;
+  /**
+   * Source for address history: `backfill_address` and `reindex_scope` jobs read through it, the live loop and
+   * `reindex_range` through `source`. Same kind as `source`. Default: `source`.
+   */
+  backfillSource?: S;
   /** Optional JSON-RPC URL, enables `context.client.readContract` (EVM only). */
   rpc?: string;
   /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin), 32 slots (Solana). */
