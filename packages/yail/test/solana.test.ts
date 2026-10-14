@@ -206,6 +206,7 @@ describe("solana programs end to end", () => {
   });
   afterAll(async () => {
     for (const db of dbs) await db.close();
+    await ch.stop();
   });
 
   const tx = (signature: string, slot: number, transactionIndex: number, success = true): SolanaTransaction => ({ signature, slot, transactionIndex, feePayer: WALLET, fee: 5000n, success });
