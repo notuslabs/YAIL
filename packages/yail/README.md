@@ -329,6 +329,7 @@ Logs are [evlog](https://www.evlog.dev) wide events: one per batch (chain, block
 | `yail.jobs` (counter, by outcome) | `outcome=failed` |
 | `yail.batch.duration`, `yail.handler.duration`, `yail.flush.duration` | latency histograms |
 | `yail.cache.events` | hit/miss by cache |
+| `yail.source.requests` (counter, per chain) | a rate near the provider's limit (HyperSync: per token per minute) |
 
 Export everything with one call:
 
@@ -338,7 +339,7 @@ startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:
 ```
 Set `observability.otlpEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to ship logs over OTLP too, and `observability.logsToClickHouse: true` to keep them in `_yail_logs` next to your data (zero extra infrastructure). Recent events are always available at `GET /_evlog/logs`.
 
-HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`.
+HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` counts the requests each chain's sources sent, retries included (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains). A source of your own reports them through `onRequest`.
 
 ### Testing with real data
 

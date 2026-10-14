@@ -1,5 +1,5 @@
 import type { FetchOptions, SolanaQuery, SolanaSource } from "../types.js";
-import { mapLimit } from "../../util.js";
+import { counted, mapLimit, requestListeners } from "../../util.js";
 import { jsonRpc, orderInSlots, toBatch, type RawTransaction } from "./json-rpc.js";
 import { solanaRpc } from "./rpc.js";
 import { finishBatch } from "./shared.js";
@@ -34,9 +34,11 @@ const TOKEN_OWNERS_FROM_SLOT = 111_491_819;
  */
 export function helius(options: HeliusOptions): SolanaSource {
   const name = `helius(${new URL(options.url).host})`;
-  const call = jsonRpc(name, options);
+  const listeners = requestListeners();
+  const doFetch = counted(options.fetch ?? fetch, listeners.count);
+  const call = jsonRpc(name, { ...options, fetch: doFetch });
   const concurrency = options.concurrency ?? 4;
-  const beforeTokenOwners = solanaRpc({ ...options, kind: "solana" });
+  const beforeTokenOwners = solanaRpc({ ...options, kind: "solana", fetch: doFetch });
 
   async function history(wallet: string, from: number, to: number, signal?: AbortSignal): Promise<RawTransaction[]> {
     const transactions: RawTransaction[] = [];
@@ -80,5 +82,6 @@ export function helius(options: HeliusOptions): SolanaSource {
       await orderInSlots(raws, call, concurrency, signal);
       yield finishBatch(toBatch(raws, wallets, new Map(), { ...query, fromBlock }));
     },
+    onRequest: listeners.onRequest,
   };
 }

@@ -26,6 +26,7 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
     kind: inner.kind,
     name: `cached(${inner.name})`,
     getHeight: () => inner.getHeight(),
+    onRequest: (listener: () => void) => inner.onRequest?.(listener) ?? (() => {}),
     async *fetch(query: QueryOf<S>, fetchOptions?: FetchOptions): AsyncIterable<BatchOf<S>> {
       const queryHash = hashQuery(query);
       const cachedRanges = await options.db.query<{ from_block: string; next_block: string }>(

@@ -1,8 +1,12 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { union } from "../src/sources/union.js";
 import { hypersync } from "../src/sources/hypersync.js";
 import { rpc } from "../src/sources/rpc.js";
-import { hashQuery } from "../src/sources/cached.js";
+import { esplora } from "../src/sources/esplora.js";
+import { helius } from "../src/sources/solana/helius.js";
+import { cached, hashQuery } from "../src/sources/cached.js";
+import { createDb } from "../src/db/client.js";
 import { fixtureSource } from "../src/sources/fixture.js";
 import { buildAddressQuery, buildPlans } from "../src/indexer/plan.js";
 import { solanaAccountEvent } from "../src/indexer/events.js";
@@ -369,5 +373,116 @@ describe("Solana accounts", () => {
     expect(plan.kind).toBe("solana");
     expect(buildAddressQuery(plan, 0, 10, registry).addresses).toEqual([wallet]);
     expect(hashQuery({ fromBlock: 0, toBlock: 1, addresses: [wallet] } as any)).not.toBe(hashQuery({ fromBlock: 0, toBlock: 1, addresses: [wallet.toLowerCase()] } as any));
+  });
+});
+
+describe("onRequest", () => {
+  /** A local HTTP server answering each request with `reply(path, body)`. */
+  async function localServer(reply: (path: string, body: string) => string) {
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        res.setHeader("Content-Type", "application/json");
+        res.end(reply(req.url ?? "", body));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    return { url: `http://127.0.0.1:${port}`, close: () => new Promise((resolve) => server.close(resolve)) };
+  }
+
+  /** A listener and how many times it was called. */
+  function counter() {
+    let count = 0;
+    return {
+      listener: () => {
+        count++;
+      },
+      count: () => count,
+    };
+  }
+
+  it("counts every HTTP attempt, retries included, until the listener is removed", async () => {
+    const paths: string[] = [];
+    const fake: typeof fetch = async (input) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path.endsWith("/height") && paths.length === 1) return new Response("busy", { status: 503 });
+      if (path.endsWith("/height")) return new Response("100");
+      return new Response("[]");
+    };
+    const source = esplora({ url: "https://mempool.space/api", fetch: fake });
+    const seen = counter();
+    const remove = source.onRequest?.(seen.listener);
+    expect(await source.getHeight()).toBe(100);
+    for await (const batch of source.fetch({ fromBlock: 0, toBlock: 100, addresses: ["a", "b"] })) expect(batch.transactions).toEqual([]);
+    expect(paths).toEqual(["/api/blocks/tip/height", "/api/blocks/tip/height", "/api/address/a/txs/chain", "/api/address/b/txs/chain"]);
+    expect(seen.count()).toBe(4);
+    remove?.();
+    await source.getHeight();
+    expect(seen.count()).toBe(4);
+  });
+
+  it("counts helius() calls and those of the rpc() it reads below slot 111,491,819", async () => {
+    const methods: string[] = [];
+    const fake: typeof fetch = async (_input, init) => {
+      const { method, params } = JSON.parse(String(init?.body));
+      methods.push(method);
+      const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      if (method === "getTransactionsForAddress" && params[1].transactionDetails === "signatures") return reply({ data: [{ signature: "old" }] });
+      if (method === "getTransactionsForAddress") return reply({ data: [], paginationToken: null });
+      if (method === "getTokenAccountsByOwner") return reply({ value: [] });
+      return reply([]);
+    };
+    const source = helius({ url: "https://mainnet.helius-rpc.com/?api-key=test", fetch: fake });
+    const seen = counter();
+    source.onRequest?.(seen.listener);
+    for await (const batch of source.fetch({ fromBlock: 100_000_000, toBlock: 200_000_000, addresses: ["W"] })) expect(batch.balances).toEqual([]);
+    expect(methods).toEqual(["getTransactionsForAddress", "getTokenAccountsByOwner", "getTokenAccountsByOwner", "getSignaturesForAddress", "getTransactionsForAddress"]);
+    expect(seen.count()).toBe(5);
+  });
+
+  it("counts Solana HyperSync and Solana RPC requests through union() and cached()", async () => {
+    const fake: typeof fetch = async (input, init) => {
+      if (String(input).endsWith("/height")) return new Response("453000000");
+      if (String(init?.body).includes("getSlot")) return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: 452_000_000 }));
+      return new Response(JSON.stringify({ next_slot: 2, blocks: [], transactions: [], account_activity: [] }));
+    };
+    const recent = hypersync({ kind: "solana", apiToken: "t", fetch: fake });
+    const older = rpc({ kind: "solana", url: "https://solana-mainnet.g.alchemy.com/v2/key", fetch: fake });
+    const source = cached(union(recent, older), { db: createDb({ url: "http://127.0.0.1:1" }), chain: "solana" });
+    const seen = counter();
+    const remove = source.onRequest?.(seen.listener);
+    expect(await source.getHeight()).toBe(453_000_000);
+    expect(await older.getHeight()).toBe(452_000_000);
+    for await (const batch of recent.fetch({ fromBlock: 1, toBlock: 2, addresses: ["W"] })) expect(batch.nextBlock).toBe(2);
+    expect(seen.count()).toBe(3);
+    remove?.();
+    await recent.getHeight();
+    await older.getHeight();
+    expect(seen.count()).toBe(3);
+  });
+
+  it("counts EVM HyperSync and EVM RPC requests", async () => {
+    const hypersyncServer = await localServer(() => JSON.stringify({ height: 123 }));
+    const rpcServer = await localServer((_path, body) => {
+      const calls: Array<{ id: number }> = [JSON.parse(body)].flat();
+      return JSON.stringify(calls.map(({ id }) => ({ jsonrpc: "2.0", id, result: "0x10" })));
+    });
+    try {
+      const seen = counter();
+      const evmHypersync = hypersync({ url: hypersyncServer.url, apiToken: "t" });
+      const evmRpc = rpc({ url: rpcServer.url });
+      evmHypersync.onRequest?.(seen.listener);
+      evmRpc.onRequest?.(seen.listener);
+      expect(await evmHypersync.getHeight()).toBe(123);
+      expect(await evmRpc.getHeight()).toBe(16);
+      expect(seen.count()).toBe(2);
+    } finally {
+      await hypersyncServer.close();
+      await rpcServer.close();
+    }
   });
 });

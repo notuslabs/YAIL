@@ -1,7 +1,7 @@
 import { HypersyncClient, JoinMode, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TraceField, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock, type Trace as HsTrace } from "@envio-dev/hypersync-client";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, FetchOptions, SolanaSource } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
-import { lowerOrNull } from "../util.js";
+import { lowerOrNull, requestListeners } from "../util.js";
 import { solanaHypersync, type SolanaHypersyncOptions } from "./solana/hypersync.js";
 
 export type { SolanaHypersyncOptions };
@@ -47,6 +47,7 @@ export function hypersync(options: HypersyncOptions | SolanaHypersyncOptions): E
 
 function evmHypersync(options: HypersyncOptions): EvmSource {
   const clients = new Map<string, HypersyncClient>();
+  const listeners = requestListeners();
   const getClient = (url = options.url) => {
     // Resolved lazily so `yail ddl` / `yail migrate` work without a token.
     const apiToken = options.apiToken ?? process.env.ENVIO_API_TOKEN;
@@ -78,9 +79,9 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
     const span = query.toBlock - query.fromBlock;
     const threshold = options.streamThreshold ?? 5000;
     if (span >= threshold) {
-      yield* streamRange(getClient(url), hsQuery, query, options, fetchOptions);
+      yield* streamRange(getClient(url), hsQuery, query, options, listeners.count, fetchOptions);
     } else {
-      yield* getRange(getClient(url), hsQuery, query, fetchOptions);
+      yield* getRange(getClient(url), hsQuery, query, listeners.count, fetchOptions);
     }
   }
 
@@ -88,7 +89,9 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
     kind: "evm",
     name: `hypersync(${new URL(options.url).host})`,
     async getHeight() {
-      return getClient().getHeight();
+      const client = getClient();
+      listeners.count();
+      return client.getHeight();
     },
     async *fetch(query: EvmQuery, fetchOptions?: FetchOptions) {
       // A joined query returns every matched transaction whole, so plain log filters must not ride along with it:
@@ -103,7 +106,9 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
       yield* fetchRouted(query, fetchOptions);
     },
     async getBlock(number: number) {
-      const res = await getClient().get({
+      const client = getClient();
+      listeners.count();
+      const res = await client.get({
         fromBlock: number,
         toBlock: number + 1,
         includeAllBlocks: true,
@@ -113,6 +118,7 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
       if (!b) return null;
       return toBlock(b);
     },
+    onRequest: listeners.onRequest,
   };
   return source;
 }
@@ -154,11 +160,11 @@ async function* mergeByBlock(main: AsyncGenerator<EvmBatch>, other: AsyncGenerat
   await other.return(undefined);
 }
 
-async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
+async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, count: () => void, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
   let from = query.fromBlock;
   while (from < query.toBlock) {
     fetchOptions?.signal?.throwIfAborted();
-    const res = await getFrom(client, hsQuery, from);
+    const res = await getFrom(client, hsQuery, from, count);
     const next = Math.min(res.nextBlock, query.toBlock);
     if (next <= from) throw new Error(`hypersync: nextBlock ${res.nextBlock} did not advance from ${from}`);
     yield toBatch(res, from, next);
@@ -166,7 +172,7 @@ async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuer
   }
 }
 
-async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, options: HypersyncOptions, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
+async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, options: HypersyncOptions, count: () => void, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
   const cfg: StreamConfig = {
     concurrency: options.concurrency ?? 8,
     responseBytesTarget: options.responseBytesTarget ?? 400_000,
@@ -178,6 +184,7 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
       if (fetchOptions?.signal?.aborted) break;
       const res = await stream.recv();
       if (res === null) break;
+      count();
       const next = Math.min(res.nextBlock, query.toBlock);
       if (next <= from) continue; // empty overlapping page
       yield toBatch(res, from, next);
@@ -189,13 +196,14 @@ async function* streamRange(client: HypersyncClient, hsQuery: Query, query: EvmQ
   fetchOptions?.signal?.throwIfAborted();
   // The stream API is allowed to stop early (server-side limits); cover the remainder with plain gets.
   if (from < query.toBlock) {
-    yield* getRange(client, hsQuery, { ...query, fromBlock: from }, fetchOptions);
+    yield* getRange(client, hsQuery, { ...query, fromBlock: from }, count, fetchOptions);
   }
 }
 
 /** Near the head, a server behind the reported height can answer without advancing: ask again before giving up. */
-async function getFrom(client: HypersyncClient, hsQuery: Query, from: number): Promise<QueryResponse> {
+async function getFrom(client: HypersyncClient, hsQuery: Query, from: number, count: () => void): Promise<QueryResponse> {
   for (let attempt = 1; ; attempt++) {
+    count();
     const res = await client.get({ ...hsQuery, fromBlock: from });
     if (res.nextBlock > from || attempt === 5) return res;
     await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));

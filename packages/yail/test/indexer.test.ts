@@ -9,6 +9,7 @@ import { sql } from "../src/db/sql.js";
 import { internalTables } from "../src/db/index.js";
 import type { DatabaseConfig } from "../src/db/client.js";
 import type { EvmBatch, EvmQuery, EvmSource, FetchOptions } from "../src/sources/types.js";
+import { requestListeners } from "../src/util.js";
 import { FixtureBuilder, addr } from "./helpers.js";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
@@ -312,6 +313,41 @@ describe("indexer end-to-end (synthetic fixture)", () => {
     expect(second.indexer.observability.metrics.counters.cacheHits).toBeGreaterThan(0);
     await second.indexer.db.close();
     await first.indexer.db.close();
+  });
+});
+
+describe("source requests", () => {
+  it("counts the source's requests in /status, per chain, until the indexer stops", async () => {
+    const fixture = fixtureSource(buildFixture(), { blocksPerBatch: 25 });
+    const listeners = requestListeners();
+    let sent = 0;
+    const send = () => {
+      sent++;
+      listeners.count();
+    };
+    const source: EvmSource = {
+      ...fixture,
+      async getHeight() {
+        send();
+        return fixture.getHeight();
+      },
+      async *fetch(query, options) {
+        for await (const batch of fixture.fetch(query, options)) {
+          send();
+          yield batch;
+        }
+      },
+      onRequest: listeners.onRequest,
+    };
+    const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture(), source });
+    await indexer.run();
+    const status = await indexer.status();
+    expect(sent).toBeGreaterThan(1);
+    expect(status.counters.sourceRequests).toBe(sent);
+    expect(status.chains.test?.sourceRequests).toBe(sent);
+    await source.getHeight();
+    expect((await indexer.status()).counters.sourceRequests).toBe(sent - 1);
+    await indexer.db.close();
   });
 });
 

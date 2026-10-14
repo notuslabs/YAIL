@@ -61,6 +61,30 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** The listeners of a source's requests: `count()` calls each one, `onRequest` adds one and returns its removal. */
+export function requestListeners(): { count(): void; onRequest(listener: () => void): () => void } {
+  const listeners = new Set<() => void>();
+  return {
+    count() {
+      for (const listener of listeners) listener();
+    },
+    onRequest(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+/** `doFetch`, calling `count` before each request it sends. */
+export function counted(doFetch: typeof fetch, count: () => void): typeof fetch {
+  return (input, init) => {
+    count();
+    return doFetch(input, init);
+  };
+}
+
 /**
  * An HTTP response body, retried with backoff on 429, 5xx and network errors. Other statuses throw at once. Errors
  * name the host only: providers put API keys in the path (Alchemy) or the query (Helius).

@@ -14,6 +14,8 @@ export interface ChainStats {
   eventsProcessed: number;
   batches: number;
   errors: number;
+  /** Requests sent to the chain's sources (`source` and `backfillSource`), retries included. */
+  sourceRequests: number;
   lastBatchMs: number;
   lastBatchAt?: string;
   caughtUp: boolean;
@@ -43,6 +45,7 @@ export class Metrics {
   private cacheEvents;
   private jobEvents;
   private sourceDuration;
+  private sourceRequests;
 
   constructor(serviceName = "yail") {
     this.meter = otelMetrics.getMeter(serviceName);
@@ -58,6 +61,7 @@ export class Metrics {
     this.cacheEvents = m.createCounter("yail.cache.events", { description: "Cache hits/misses by cache" });
     this.jobEvents = m.createCounter("yail.jobs", { description: "Backfill / reindex jobs by outcome" });
     this.sourceDuration = m.createHistogram("yail.source.duration", { description: "Time waiting on the data source per batch", unit: "ms" });
+    this.sourceRequests = m.createCounter("yail.source.requests", { description: "Requests sent to the data sources, retries included", unit: "{request}" });
 
     m.createObservableGauge("yail.chain.head", { description: "Source head block" }).addCallback((r) => {
       for (const [chain, s] of this.chains) r.observe(s.head, { chain });
@@ -76,7 +80,7 @@ export class Metrics {
   chain(name: string): ChainStats {
     let s = this.chains.get(name);
     if (!s) {
-      s = { cursor: 0, head: 0, finalized: 0, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, lastBatchMs: 0, caughtUp: false };
+      s = { cursor: 0, head: 0, finalized: 0, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, sourceRequests: 0, lastBatchMs: 0, caughtUp: false };
       this.chains.set(name, s);
     }
     return s;
@@ -106,6 +110,12 @@ export class Metrics {
   recordEvent(chain: string, name: string, ms: number): void {
     this.eventsProcessed.add(1, { chain, event: name });
     this.handlerDuration.record(ms, { chain, event: name });
+  }
+
+  recordSourceRequest(chain: string): void {
+    this.chain(chain).sourceRequests++;
+    this.counters.sourceRequests++;
+    this.sourceRequests.add(1, { chain });
   }
 
   recordFlush(table: string, rows: number, ms: number): void {

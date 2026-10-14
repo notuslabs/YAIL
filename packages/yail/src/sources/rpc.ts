@@ -1,7 +1,7 @@
 import { createPublicClient, http, type PublicClient } from "viem";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions, SolanaSource } from "./types.js";
 import { lower } from "./types.js";
-import { lowerOrNull, mapLimit } from "../util.js";
+import { lowerOrNull, mapLimit, requestListeners } from "../util.js";
 import { solanaRpc, type SolanaRpcOptions } from "./solana/rpc.js";
 
 export type { SolanaRpcOptions };
@@ -16,7 +16,7 @@ export interface RpcSourceOptions {
   receipts?: boolean;
   /** Max concurrent RPC requests. Default 4. */
   concurrency?: number;
-  /** Optional viem client override (testing). */
+  /** Optional viem client override (testing). Its requests are not counted (`onRequest`). */
   client?: PublicClient;
 }
 
@@ -46,7 +46,8 @@ export function rpc(options: RpcSourceOptions | SolanaRpcOptions): EvmSource | S
 }
 
 function evmRpc(options: RpcSourceOptions): EvmSource {
-  const client = options.client ?? createPublicClient({ transport: http(options.url, { batch: true, retryCount: 5 }) });
+  const listeners = requestListeners();
+  const client = options.client ?? createPublicClient({ transport: http(options.url, { batch: true, retryCount: 5, onFetchRequest: () => listeners.count() }) });
   const blockRange = options.blockRange ?? 2000;
   const concurrency = options.concurrency ?? 4;
 
@@ -70,6 +71,7 @@ function evmRpc(options: RpcSourceOptions): EvmSource {
       if (!b) return null;
       return { number: Number(b.number), hash: b.hash, parentHash: b.parentHash, timestamp: Number(b.timestamp) };
     },
+    onRequest: listeners.onRequest,
   };
 
   async function fetchRange(from: number, to: number, query: EvmQuery): Promise<EvmBatch> {
