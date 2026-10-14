@@ -171,6 +171,8 @@ indexer.on("Program:SwapEvent", ...)  // Solana event: { data, address, transact
 indexer.on("setup", ...)              // once per chain before indexing starts
 ```
 
+An account's events are typed by the kind of its chain, an optional key (`{ solana?: … }`, a chain configured only sometimes) included. A map of chains built at runtime (`Object.fromEntries(…)`) and spread into `chains` loses its names in TypeScript: accounts on those chains get EVM events, and `context.chain.name` is a `string`.
+
 On Solana a "block" is a slot. An event is a transaction that changed the wallet's SOL or the tokens of an account it owns: `lamports` is the wallet's SOL change (fee included when it paid), `tokens` the change per token account, `balances` the rows before and after. Every Solana source reports the same rows (an account is listed only where its SOL or tokens changed); `transactionIndex` orders transactions within a slot, though HyperSync counts only non-vote transactions and RPC counts all of them.
 
 Writes are buffered per source batch and flushed as one INSERT per table before the checkpoint is written. Events are processed in `(block, txIndex, logIndex)` order per chain; chains run concurrently. Only events with a registered handler are fetched from the source.

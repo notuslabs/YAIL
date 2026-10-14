@@ -127,13 +127,23 @@ export interface SetupEvent {
   block: number;
 }
 
-type ChainKind<C extends Config<any, any, any>, ref> = ref extends string
-  ? NonNullable<C["chains"][ref]>["source"]["kind"]
-  : NonNullable<C["chains"][keyof ref & string]>["source"]["kind"];
+/** Chain names a `chain` field refers to: the name, or the keys of a per-chain map (`string` for a map built at runtime). */
+type RefNames<ref> = ref extends string ? ref : keyof ref & string;
+
+/**
+ * Kind of the chain `name`, an optional key (`{ solana?: … }`) included. A name the chains' type does not have is
+ * the kind of its string index signature, or EVM when it has none: spreading a map built at runtime
+ * (`{ ...Object.fromEntries(…), ...{ bitcoin?: … } }`) drops the map's index signature, and with it its chains.
+ */
+type ChainKind<C extends Config<any, any, any>, name extends string> = name extends keyof C["chains"]
+  ? NonNullable<C["chains"][name]>["source"]["kind"]
+  : string extends keyof C["chains"]
+    ? NonNullable<C["chains"][string]>["source"]["kind"]
+    : "evm";
 
 type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; solana: SolanaAccountEvent };
 
-export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> = AccountEventByKind[ChainKind<C, AccountsOf<C>[K]["chain"]> & keyof AccountEventByKind];
+export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> = AccountEventByKind[ChainKind<C, RefNames<AccountsOf<C>[K]["chain"]>> & keyof AccountEventByKind];
 
 export type ProgramEventOf<P extends ProgramConfig<any, any>, E extends string> = E extends keyof NonNullable<P["instructions"]>
   ? NonNullable<P["instructions"]>[E] extends InstructionDef<infer args, infer account>
@@ -157,7 +167,10 @@ export type EventOf<C extends Config<any, any, any>, name extends string> = name
           : never
     : never;
 
-export type ChainNames<C extends Config<any, any, any>> = keyof C["chains"] & string;
+type ReferencedChains<entries> = { [K in keyof entries]: entries[K] extends { chain: infer ref } ? RefNames<ref> : never }[keyof entries];
+
+/** The chains' names and the names contracts, accounts and programs refer to: a map spread into `chains` loses its names in the type, the references keep them (`string` for a map built at runtime). */
+export type ChainNames<C extends Config<any, any, any>> = (keyof C["chains"] & string) | ReferencedChains<ContractsOf<C>> | ReferencedChains<AccountsOf<C>> | ReferencedChains<ProgramsOf<C>>;
 
 // ------------------------------------------------------------ runtime
 

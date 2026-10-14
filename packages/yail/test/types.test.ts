@@ -37,6 +37,26 @@ describe("account event types", () => {
     expectTypeOf<EventOf<typeof config, "SolanaWallets:transaction">>().toEqualTypeOf<SolanaAccountEvent>();
   });
 
+  it("types a chains spread by chain, the runtime-built map as EVM", () => {
+    const config = createConfig({
+      database,
+      chains: { ...perChain((name) => ({ id: name, source: evm })), ...onBitcoin({ id: "bitcoin", source: bitcoin }), ...onSolana({ id: "solana", source: solana }) },
+      accounts,
+    });
+    const indexer = createIndexer({ config, schema: {} });
+    indexer.on("Wallets:transaction", ({ event, context }) => {
+      expectTypeOf(event).toEqualTypeOf<EvmAccountEvent>();
+      expectTypeOf(event.transaction.hash).toEqualTypeOf<string>();
+      expectTypeOf(context.chain.name).toEqualTypeOf<string>();
+    });
+    indexer.on("BtcWallets:transaction", ({ event }) => {
+      expectTypeOf(event).toEqualTypeOf<BitcoinAccountEvent>();
+    });
+    indexer.on("SolanaWallets:transaction", ({ event }) => {
+      expectTypeOf(event).toEqualTypeOf<SolanaAccountEvent>();
+    });
+  });
+
   it("types a spread of literal-keyed optional chains by chain", () => {
     const evmChains: { polygon?: { id: number; source: typeof evm }; base?: { id: number; source: typeof evm } } = { polygon: { id: 137, source: evm }, base: { id: 8453, source: evm } };
     const config = createConfig({
