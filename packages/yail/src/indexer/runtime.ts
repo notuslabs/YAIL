@@ -60,6 +60,8 @@ export interface ProcessRangeOptions {
   label?: string;
   /** Where the range is read from. Default: the chain's `source`. */
   source?: Source;
+  /** Called once each batch is written, with the first block after it. */
+  onProgress?: (nextBlock: number) => Promise<void>;
 }
 
 export class ChainRunner {
@@ -325,6 +327,7 @@ export class ChainRunner {
       wide.set({ events: eventCount, logs: (batch as EvmBatch).logs?.length ?? 0, transactions: batch.transactions.length, sourceMs: Math.round(sourceMs), processMs: Math.round(ms), rows: metrics.counters.rowsFlushed });
       if (this.deps.obs.config.batchEvents) wide.emit();
       batchFrom = batch.nextBlock;
+      await options.onProgress?.(batchFrom);
       sourceStart = performance.now();
     }
     if (live && batchFrom < to) await this.advance(to);

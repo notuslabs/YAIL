@@ -452,4 +452,51 @@ describe("jobs", () => {
     expect(indexer.addresses.list({ set: "wallets", status: "live" }).map((r) => r.address)).toContain(W3);
     await indexer.db.close();
   });
+
+  it("retries a job that failed mid-range from the first block it had not written", async () => {
+    const database = await caughtUp();
+    const history = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }), (call, batch) => {
+      if (call === 1 && batch === 1) throw new Error("source unavailable");
+    });
+    const scheduled = useFakeClock();
+    const { indexer, jobs } = await drive(backfillW3(database, buildFixture(), history.source));
+    await until(() => scheduled(30_000) === 1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await until(() => jobs.pending === 0);
+    await drive(jobs.stop(), 1_000);
+    useRealClock();
+    expect(history.calls.map((c) => c.fromBlock)).toEqual([0, 25]);
+    expect((await balances(indexer))[W3]).toEqual({ total: 5n, n: 2 });
+    await indexer.db.close();
+  });
+
+  it("resumes a killed backfill from the checkpoint it saved", async () => {
+    const database = await caughtUp();
+    let killed = false;
+    const history = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }), async (_call, batch) => {
+      if (batch === 1) {
+        killed = true;
+        await new Promise(() => {});
+      }
+      vi.setSystemTime(Date.now() + 61_000);
+    });
+    useFakeClock();
+    const first = await drive(backfillW3(database, buildFixture(), history.source));
+    await until(() => killed);
+    await drive(first.jobs.stop(), 1_000);
+    useRealClock();
+    await first.indexer.db.close();
+
+    const resumed = recorded(fixtureSource(buildFixture(), { blocksPerBatch: 25 }));
+    const { indexer } = makeIndexer(database, { fixture: buildFixture(), backfillSource: resumed.source });
+    await indexer.init();
+    const [saved] = await indexer.db.rows(internalTables.jobs);
+    expect([saved!.status, saved!.payload.fromBlock]).toEqual(["running", 25]);
+    await indexer.run();
+    expect(resumed.queries.map((q) => [q.fromBlock, q.toBlock])).toEqual([[25, 111]]);
+    expect((await balances(indexer))[W3]).toEqual({ total: 5n, n: 2 });
+    const [done] = await indexer.db.rows(internalTables.jobs);
+    expect([done!.status, done!.attempts]).toEqual(["done", 2]);
+    await indexer.db.close();
+  });
 });
