@@ -8,7 +8,7 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch } from "../sources/types.js";
+import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBatch, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
@@ -58,6 +58,10 @@ export interface ProcessRangeOptions {
   backfill: boolean;
   signal?: AbortSignal;
   label?: string;
+  /** Where the range is read from. Default: the chain's `source`. */
+  source?: Source;
+  /** Called once each batch is written, with the first block after it. */
+  onProgress?: (nextBlock: number) => Promise<void>;
 }
 
 export class ChainRunner {
@@ -234,19 +238,23 @@ export class ChainRunner {
     await this.deps.registry.load();
   }
 
-  /** Adopt newly registered addresses at the current cursor and schedule their history. */
+  /**
+   * Adopt newly registered addresses at the current cursor and schedule their history. A failed address registered
+   * again keeps the block it was first adopted at: the live loop has indexed it since.
+   */
   private async adoptPending(): Promise<void> {
     const pending = this.deps.registry.unadopted(this.chain);
     if (pending.length === 0) return;
-    const at = this.cursor;
-    const needBackfill = pending.filter((r) => Number(r.fromBlock) < at);
-    const liveNow = pending.filter((r) => Number(r.fromBlock) >= at);
-    await this.deps.registry.updateMany(needBackfill, { adopted: true, adoptedAtBlock: BigInt(at), status: "pending" });
-    await this.deps.registry.updateMany(liveNow, { adopted: true, adoptedAtBlock: BigInt(at), status: "live" });
+    const at = BigInt(this.cursor);
+    const adopted = pending.map((r) => ({ ...r, adoptedAtBlock: r.adoptedAtBlock > 0n ? r.adoptedAtBlock : at }));
+    const needBackfill = adopted.filter((r) => r.fromBlock < r.adoptedAtBlock);
+    const liveNow = adopted.filter((r) => r.fromBlock >= r.adoptedAtBlock);
+    await this.deps.registry.updateMany(needBackfill, { adopted: true, status: "pending" });
+    await this.deps.registry.updateMany(liveNow, { adopted: true, status: "live" });
     for (const r of needBackfill) {
-      await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: at });
+      await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: Number(r.adoptedAtBlock) });
     }
-    this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: at, live: liveNow.length, backfill: needBackfill.length });
+    this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: this.cursor, live: liveNow.length, backfill: needBackfill.length });
   }
 
   /**
@@ -257,7 +265,7 @@ export class ChainRunner {
     const { metrics, log } = this.deps.obs;
     const stats = { batches: 0, events: 0 };
     if (from >= to) return stats;
-    const source = this.plan.config.source;
+    const source = options.source ?? this.plan.config.source;
     const addressChunk = this.deps.config.indexing?.addressChunk ?? 500;
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;
@@ -323,6 +331,7 @@ export class ChainRunner {
       wide.set({ events: eventCount, logs: (batch as EvmBatch).logs?.length ?? 0, transactions: batch.transactions.length, sourceMs: Math.round(sourceMs), processMs: Math.round(ms), rows: metrics.counters.rowsFlushed });
       if (this.deps.obs.config.batchEvents) wide.emit();
       batchFrom = batch.nextBlock;
+      await options.onProgress?.(batchFrom);
       sourceStart = performance.now();
     }
     if (live && batchFrom < to) await this.advance(to);

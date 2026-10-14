@@ -144,7 +144,7 @@ export function compileFilter(abi: Abi, filter: EventFilter): CompiledFilter {
 
 export function encodeTopicValue(type: string, value: string | number | bigint | boolean): string {
   if (type === "address") return `0x${"0".repeat(24)}${String(value).toLowerCase().replace(/^0x/, "")}`;
-  if (type.startsWith("bytes") && type !== "bytes") return String(value).toLowerCase();
+  if (type.startsWith("bytes") && type !== "bytes") return String(value).toLowerCase().padEnd(66, "0");
   return encodeAbiParameters([{ type }], [value as any]).toLowerCase();
 }
 

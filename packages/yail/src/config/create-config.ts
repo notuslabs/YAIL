@@ -25,6 +25,9 @@ export function validateConfig(config: Config): void {
   for (const [name, chain] of Object.entries(config.chains)) {
     if (!chain.source) throw new Error(`chain "${name}": source is required`);
     if (chain.id === undefined) throw new Error(`chain "${name}": id is required`);
+    if (chain.backfillSource && chain.backfillSource.kind !== chain.source.kind) {
+      throw new Error(`chain "${name}": backfillSource ${chain.backfillSource.name} is a ${chain.backfillSource.kind} source, source ${chain.source.name} is ${chain.source.kind}`);
+    }
   }
   const sets = new Set(Object.keys(config.addressSets ?? {}));
   const checkChainRef = (owner: string, ref: string | Record<string, unknown>) => {

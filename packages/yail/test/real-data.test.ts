@@ -19,6 +19,9 @@ let ch: TestClickHouse;
 beforeAll(async () => {
   ch = await startTestClickHouse();
 });
+afterAll(async () => {
+  await ch.stop();
+});
 
 describe("Uniswap V3 pool on Base (WETH/USDC 0.05%)", () => {
   const fixture = readFixture<EvmFixture>(`${fixtures}base-univ3-weth-usdc.json`);

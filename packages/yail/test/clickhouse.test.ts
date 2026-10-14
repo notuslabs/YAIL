@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
@@ -33,6 +33,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await db?.close();
+  await ch.stop();
 });
 
 describe("clickhouse", () => {
@@ -109,6 +110,39 @@ describe("clickhouse", () => {
     expect(await db.query(sql`SELECT wallet, amount FROM ${balances}`)).toEqual([{ wallet: "0xaaa", amount: "8" }]);
     expect(await db.query(sql`SELECT wallet FROM ${positive}`)).toEqual([{ wallet: "0xaaa" }]);
     await migrate(db, { positive, events, totals, totalsMv, balances }); // re-running migrate replaces the views in place
+  });
+
+  it("populates a view's target by column name, whatever order its query selects them in", async () => {
+    const labels = table("labels", { wallet: t.address(), label: t.string(), rank: t.uint32() }, { orderBy: ["wallet"] });
+    const copy = table("labels_copy", { wallet: t.address(), label: t.string(), rank: t.uint32() }, { orderBy: ["wallet"] });
+    const copyMv = materializedView("labels_copy_mv", { from: labels, to: copy, query: sql`SELECT label, wallet, rank, _yail_version, _yail_block, _yail_chain FROM ${labels}` });
+    const own = createDb(ch.database());
+    await migrate(own, { labels });
+    await own.insert(labels).values({ wallet: "0xaaa", label: "whale", rank: 1 }, { chain: "base", block: 7, version: 9n });
+    await migrate(own, { labels, copy, copyMv }, { populate: true });
+    expect(await own.query(sql`SELECT wallet, label, rank, _yail_chain, _yail_block, _yail_version FROM ${copy}`)).toEqual([
+      { wallet: "0xaaa", label: "whale", rank: 1, _yail_chain: "base", _yail_block: "7", _yail_version: "9" },
+    ]);
+    await own.close();
+  });
+
+  it("drops the databases it named, views included, when stopped on a YAIL_TEST_CLICKHOUSE_URL server, and starts afresh after", async () => {
+    vi.stubEnv("YAIL_TEST_CLICKHOUSE_URL", ch.url);
+    vi.resetModules();
+    const testing = await import("../src/testing/index.js");
+    const server = await testing.startTestClickHouse();
+    const scratch = createDb(server.database());
+    const counts = table("counts", { n: t.uint64() }, { orderBy: ["n"], indexMeta: false });
+    const countsMv = materializedView("counts_mv", { from: events, to: counts, query: sql`SELECT count() AS n FROM ${events}`, refresh: { schedule: "EVERY 1 HOUR" } });
+    await migrate(scratch, { events, counts, countsMv });
+    await scratch.close();
+    await server.stop();
+    const next = await testing.startTestClickHouse();
+    expect(next).not.toBe(server);
+    await next.stop();
+    vi.unstubAllEnvs();
+    expect(await db.query(sql`SELECT name FROM system.databases WHERE name = ${scratch.database}`)).toEqual([]);
+    expect(await db.query(sql`SELECT view FROM system.view_refreshes WHERE database = ${scratch.database}`)).toEqual([]);
   });
 
   it("batch writer flushes per table and answers peek()", async () => {

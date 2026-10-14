@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseAbi } from "viem";
-import { t, table, materializedView, tableDdl, materializedViewDdl, view, viewDdl } from "../src/schema/index.js";
+import { t, table, materializedView, tableDdl, materializedViewDdl, materializedViewPopulateSql, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
 import { serializeRow, deserializeRow } from "../src/db/serialize.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -84,6 +84,16 @@ describe("schema", () => {
     expect(ddl).toContain("CREATE MATERIALIZED VIEW IF NOT EXISTS `db`.`ledger_daily_mv` TO `db`.`daily` AS");
     expect(ddl).toContain("FROM `db`.`ledger`");
     expect(tableDdl(daily)).toContain("ENGINE = SummingMergeTree()");
+  });
+
+  it("populates a view's target by column name", () => {
+    const daily = table("daily", { wallet: t.address(), day: t.date(), amount: t.int256() }, { orderBy: ["wallet", "day"], indexMeta: false });
+    const mv = materializedView("ledger_daily_mv", { from: ledger, to: daily, query: sql`SELECT toDate(block_time) AS day, wallet, sum(amount) AS amount FROM ${ledger} GROUP BY wallet, day` });
+    expect(materializedViewPopulateSql(mv, "db")).toBe(
+      "INSERT INTO `db`.`daily` (`wallet`, `day`, `amount`)\nSELECT `wallet`, `day`, `amount`\nFROM (\nSELECT toDate(block_time) AS day, wallet, sum(amount) AS amount FROM `db`.`ledger` GROUP BY wallet, day\n)",
+    );
+    const copy = materializedView("ledger_copy_mv", { from: ledger, to: ledger, query: sql`SELECT * FROM ${ledger}` });
+    expect(materializedViewPopulateSql(copy)).toContain("(`chain`, `wallet`, `tx_hash`, `log_index`, `amount`, `block_time`, `note`, `tags`, `_yail_chain`, `_yail_block`, `_yail_version`)");
   });
 
   it("renders plain views that read tables and earlier views", () => {
@@ -189,6 +199,16 @@ describe("plan", () => {
     expect(matchesLogFilters(log, { fromBlock: 0, toBlock: 2, logs: [{ topics: [[TRANSFER], null, [padAddress("0x2222222222222222222222222222222222222222")]] }], transactions: [] })).toBe(true);
   });
 
+  it("right-pads bytesN filter values to a whole topic", () => {
+    const abi = parseAbi(["event Tagged(bytes4 indexed tag, bytes32 indexed id)"]);
+    const id = `0x${"ab".repeat(32)}`;
+    const f = compileFilter(abi, { event: "Tagged", args: { tag: "0xDEADBEEF", id } });
+    expect(f.topics).toEqual([
+      { index: 1, values: [`0xdeadbeef${"0".repeat(56)}`] },
+      { index: 2, values: [id] },
+    ]);
+  });
+
   it("hashes queries independent of range", () => {
     const a = hashQuery({ fromBlock: 1, toBlock: 2, logs: [{ address: ["0xAB"] }], transactions: [] } as any);
     const b = hashQuery({ fromBlock: 5, toBlock: 9, logs: [{ address: ["0xab"] }], transactions: [] } as any);
@@ -203,5 +223,12 @@ describe("config validation", () => {
     const src = fixtureSource({ version: 1, kind: "evm", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], logs: [] });
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: src } }, contracts: { A: { abi: erc20, chain: "nope" } } })).toThrow(/unknown chain "nope"/);
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: src } }, contracts: { A: { abi: erc20, chain: "base", filter: { event: "Transfer", args: { value: 1 } } } } })).toThrow(/must be indexed/);
+  });
+
+  it("rejects a backfillSource of another kind than source", () => {
+    const evm = fixtureSource({ version: 1, kind: "evm", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], logs: [] });
+    const solana = fixtureSource({ version: 1, kind: "solana", height: 1, fromBlock: 0, toBlock: 1, blocks: [], transactions: [], balances: [] });
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: solana } } })).toThrow(/backfillSource .* is a solana source, source .* is evm/);
+    expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: evm } } })).not.toThrow();
   });
 });

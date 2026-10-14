@@ -8,6 +8,8 @@ import { INDEX_META_COLUMNS } from "../schema/table.js";
 import type { Observability } from "../observability/logger.js";
 import type { ChainRunner } from "./runtime.js";
 
+const MAX_JOB_ATTEMPTS = 8;
+
 export type JobRow = InferRow<typeof jobsTable>;
 export type JobKind = JobRow["kind"];
 
@@ -33,6 +35,7 @@ export interface ReindexScopePayload {
  */
 export class JobRunner {
   private queue: JobRow[] = [];
+  private delayed = new Map<string, NodeJS.Timeout>();
   private active = 0;
   private stopped = false;
   private wake: (() => void) | undefined;
@@ -49,7 +52,7 @@ export class JobRunner {
   }
 
   get pending(): number {
-    return this.queue.length + this.active;
+    return this.queue.length + this.active + this.delayed.size;
   }
 
   async enqueue(kind: JobKind, payload: BackfillAddressPayload | ReindexRangePayload | ReindexScopePayload): Promise<JobRow> {
@@ -63,11 +66,13 @@ export class JobRunner {
 
   /** Load unfinished jobs from the database (own chain only). */
   async poll(): Promise<number> {
+    const finishedBefore = [...this.finished];
     const rows = await this.deps.db.rows(jobsTable, sql`WHERE chain = ${this.chain} AND status IN ('pending', 'running') ORDER BY created_at`);
-    const known = new Set(this.queue.map((j) => j.id));
+    for (const id of finishedBefore) this.finished.delete(id);
+    const known = new Set([...this.queue.map((j) => j.id), ...this.finished]);
     let added = 0;
     for (const r of rows) {
-      if (known.has(r.id) || this.runningIds.has(r.id)) continue;
+      if (known.has(r.id) || this.runningIds.has(r.id) || this.delayed.has(r.id)) continue;
       this.queue.push(r);
       added++;
     }
@@ -76,24 +81,29 @@ export class JobRunner {
   }
 
   private runningIds = new Set<string>();
+  /** Jobs that finished while a poll was reading: it may have read them as unfinished. */
+  private finished = new Set<string>();
 
   start(): void {
     this.stopped = false;
     this.loopPromise ??= this.loop();
   }
 
+  /** Pending retries are dropped: their jobs stay pending in `_yail_jobs` and run as soon as a runner polls them. */
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const timer of this.delayed.values()) clearTimeout(timer);
+    this.delayed.clear();
     this.wake?.();
     await this.loopPromise;
     this.loopPromise = undefined;
   }
 
-  /** Resolve once the queue is empty and no job is running. */
+  /** Resolve once no job is queued, running or waiting to be retried. */
   async drain(): Promise<void> {
     for (;;) {
       await this.poll();
-      if (this.queue.length === 0 && this.active === 0) return;
+      if (this.pending === 0) return;
       await new Promise((r) => setTimeout(r, 50));
     }
   }
@@ -108,11 +118,14 @@ export class JobRunner {
         const job = this.queue.shift()!;
         this.active++;
         this.runningIds.add(job.id);
-        void this.execute(job).finally(() => {
-          this.active--;
-          this.runningIds.delete(job.id);
-          this.wake?.();
-        });
+        void this.execute(job)
+          .catch((err) => this.deps.obs.log.warn({ event: "job_crashed", chain: this.chain, jobId: job.id, error: String(err) }))
+          .finally(() => {
+            this.active--;
+            this.runningIds.delete(job.id);
+            this.finished.add(job.id);
+            this.wake?.();
+          });
       }
       await new Promise<void>((resolve) => {
         this.wake = resolve;
@@ -125,29 +138,32 @@ export class JobRunner {
   private async execute(job: JobRow): Promise<void> {
     const { obs } = this.deps;
     const wide = obs.wide({ chain: this.chain, job: job.kind, jobId: job.id, ...job.payload });
-    const update = (patch: Partial<JobRow>) => this.deps.db.insert(jobsTable).values({ ...job, ...patch, updatedAt: new Date() });
     job.attempts += 1;
-    await update({ status: "running", attempts: job.attempts });
+    job.status = "running";
+    await this.save(job);
     try {
-      if (job.kind === "backfill_address") await this.backfillAddress(job.payload as unknown as BackfillAddressPayload);
-      else if (job.kind === "reindex_range") await this.reindexRange(job.payload as unknown as ReindexRangePayload);
+      if (job.kind === "backfill_address") await this.backfillAddress(job.payload as unknown as BackfillAddressPayload, this.checkpoint(job));
+      else if (job.kind === "reindex_range") await this.reindexRange(job.payload as unknown as ReindexRangePayload, this.checkpoint(job));
       else if (job.kind === "reindex_scope") await this.reindexScope(job.payload as unknown as ReindexScopePayload);
       job.status = "done";
-      await update({ status: "done" });
+      await this.save(job);
       obs.metrics.recordJob(job.kind, "done");
       wide.set({ outcome: "done" });
     } catch (err) {
-      const retry = job.attempts < 3;
+      const retry = job.attempts < MAX_JOB_ATTEMPTS;
       job.status = "failed";
       if (retry) job.status = "pending";
       job.error = (err as Error).message;
-      await update({ status: job.status, error: job.error });
+      await this.save(job).catch((saveErr) => obs.log.warn({ event: "job_save_failed", chain: this.chain, jobId: job.id, error: String(saveErr) }));
       if (!retry) obs.metrics.recordJob(job.kind, "failed");
       obs.metrics.recordError(this.chain, "job");
       wide.error(err as Error);
       wide.set({ outcome: job.status, attempts: job.attempts });
-      if (retry) this.queue.push(job);
-      else if (job.kind === "backfill_address") {
+      if (retry) {
+        const retryInMs = 30_000 * 2 ** (job.attempts - 1);
+        wide.set({ retryInMs });
+        this.retryLater(job, retryInMs);
+      } else if (job.kind === "backfill_address") {
         const p = job.payload as unknown as BackfillAddressPayload;
         await this.deps.registry.update(p.set, this.chain, p.address, { status: "failed", error: job.error });
       }
@@ -156,13 +172,43 @@ export class JobRunner {
     }
   }
 
-  private async backfillAddress(p: BackfillAddressPayload): Promise<void> {
+  private async save(job: JobRow): Promise<void> {
+    job.updatedAt = new Date();
+    await this.deps.db.insert(jobsTable).values(job);
+  }
+
+  /**
+   * Moves the job's `fromBlock` past every batch written, so a retry resumes there, and saves it at most once a
+   * minute, so a restart does too.
+   */
+  private checkpoint(job: JobRow): (nextBlock: number) => Promise<void> {
+    let savedAt = Date.now();
+    return async (nextBlock) => {
+      job.payload = { ...job.payload, fromBlock: nextBlock };
+      if (Date.now() - savedAt < 60_000) return;
+      savedAt = Date.now();
+      await this.save(job);
+    };
+  }
+
+  private retryLater(job: JobRow, delayMs: number): void {
+    if (this.stopped) return;
+    const timer = setTimeout(() => {
+      this.delayed.delete(job.id);
+      this.queue.push(job);
+      this.wake?.();
+    }, delayMs);
+    timer.unref();
+    this.delayed.set(job.id, timer);
+  }
+
+  private async backfillAddress(p: BackfillAddressPayload, onProgress?: (nextBlock: number) => Promise<void>): Promise<void> {
     await this.deps.registry.update(p.set, this.chain, p.address, { status: "backfilling" });
-    await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: [p.address] }, label: "backfill" });
+    await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: [p.address] }, label: "backfill", source: this.runner.plan.config.backfillSource, onProgress });
     await this.deps.registry.update(p.set, this.chain, p.address, { status: "live", error: "" });
   }
 
-  private async reindexRange(p: ReindexRangePayload): Promise<void> {
+  private async reindexRange(p: ReindexRangePayload, onProgress: (nextBlock: number) => Promise<void>): Promise<void> {
     const to = Math.min(p.toBlock, this.runner.cursor);
     for (const t of this.deps.tables) {
       if (t.options.indexMeta === false) continue;
@@ -170,7 +216,7 @@ export class JobRunner {
         sql`DELETE FROM ${t} WHERE ${sql.identifier(INDEX_META_COLUMNS.chain)} = ${this.chain} AND ${sql.identifier(INDEX_META_COLUMNS.block)} >= ${p.fromBlock} AND ${sql.identifier(INDEX_META_COLUMNS.block)} < ${to}`,
       );
     }
-    await this.runner.processRange(p.fromBlock, to, { backfill: true, label: "reindex" });
+    await this.runner.processRange(p.fromBlock, to, { backfill: true, label: "reindex", onProgress });
   }
 
   private async reindexScope(p: ReindexScopePayload): Promise<void> {

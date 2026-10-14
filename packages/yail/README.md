@@ -93,6 +93,12 @@ solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind:
 
 Recent slots come from HyperSync (a range scan: cheap per wallet set, any number of wallets), older ones from RPC (per address: cheap for the rare wallet with old history). Address backfills fetch their whole range in one go, so the RPC pages each wallet once. Solana HyperSync finds where its history starts with one-slot probes that match nothing (a binary search the first time, then one probe per hour, since the floor only moves down). The head is the first source's.
 
+A chain's `backfillSource` is where address history is read: `backfill_address` and `reindex_scope` jobs fetch through it, the live loop and `reindex_range` through `source`. It must be of the same kind as `source`, defaults to `source`, and `cache.source` wraps it too. A HyperSync scan costs its block range whatever the number of wallets, so one new Solana wallet's history is cheaper over RPC:
+
+```ts
+solana: { id: "solana", source: union(hypersync({ kind: "solana" }), rpc({ kind: "solana", url })), backfillSource: rpc({ kind: "solana", url }) },
+```
+
 The runtime only ever indexes blocks `<= head - finality` (default 20 blocks on EVM, 3 on Bitcoin, 32 slots on Solana), so reorgs are a non-issue in practice. HyperSync's rollback guard is still checked; on a mismatch the last window is re-indexed automatically.
 
 ### Schema
@@ -130,6 +136,9 @@ export const dailyMv = materializedView("wallet_daily_mv", {
   re-run their SELECT on a schedule into a real table, so they can join across rows and tables, which an insert-time
   view cannot. With `append` the query covers a recent window and the target's ReplacingMergeTree key dedups it;
   `populate` is the unwindowed query `yail migrate --populate` runs once for the history. ClickHouse >= 24.
+- `yail migrate --populate` fills a view's target by column name: it selects each of the target's columns from the
+  query by name (the `_yail_*` ones too, unless the target has `indexMeta: false`). The order of the query's columns
+  does not matter, and a column the query lacks fails the populate instead of shifting the others.
 - Plain views (``view("balances", sql`SELECT … FROM ${ledger} FINAL …`)``) hold no data: they run on every read, so they
   always agree with their tables. `yail migrate` creates or replaces them, each after the views it reads.
 
@@ -220,6 +229,8 @@ curl -X POST :42069/addresses -d '{"set":"wallets","address":["0xabc…"]}'
 
 What happens: the live loop adopts the address at its current block `N` and includes it from then on; a job backfills `[fromBlock, N)` with a query restricted to that address; the address flips to `live`. No gaps, no double processing. Progress is visible on `/status` and `/jobs`. Handlers see `context.backfill === true` during the backfill.
 
+A job that throws (a source or ClickHouse outage, a handler error) is retried up to 8 times: 30 s after the first failure, then twice as long after each one, about an hour in all. The wait lives in memory, so after a restart a pending job runs at once. Address backfills and range re-indexes keep a checkpoint: a retry starts after the last batch they wrote, and the checkpoint is saved to `_yail_jobs` at most once a minute, so a restarted indexer resumes near it too (a range re-index then deletes and rewrites from the checkpoint on). When an address backfill fails for good, the address becomes `failed` and stays live: `failed` only means its history is incomplete. Registering it again re-runs that history, `[fromBlock, N)` where `N` is the block it was first adopted at. Find failed addresses with `SELECT * FROM _yail_addresses FINAL WHERE status = 'failed'`.
+
 `factory({ address, event, parameter })` (Ponder style) discovers child contracts from a factory event; children found inside a batch have their logs fetched for the rest of that batch, so ordering is exact.
 
 ### Re-indexing
@@ -265,6 +276,7 @@ HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up o
 import { startTestClickHouse, fixtureSource, readFixture } from "@notuslabs/yail/testing";
 
 const ch = await startTestClickHouse();               // YAIL_TEST_CLICKHOUSE_URL or a testcontainer
+afterAll(() => ch.stop());                             // stops the container, or drops the databases ch.database() named
 const fixture = readFixture("test/fixtures/base-univ3-weth-usdc.json");
 const config = createConfig({ database: ch.database(), chains: { base: { id: 8453, source: fixtureSource(fixture), finality: 0 } }, contracts: { … } });
 const indexer = createIndexer({ config, schema });

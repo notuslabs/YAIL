@@ -6,7 +6,7 @@ import { createDb, type Db } from "../db/client.js";
 import { collectSchema, migrate, type MigrateOptions, type SchemaModule } from "../db/migrate.js";
 import { createHttpClient, type HttpClient } from "../http/client.js";
 import { initObservability, type Observability } from "../observability/logger.js";
-import { cached } from "../sources/cached.js";
+import { cached, type CachedSourceOptions } from "../sources/cached.js";
 import type { MaterializedView } from "../schema/view.js";
 import type { Table } from "../schema/table.js";
 import { isAddressSet, isFactory } from "../config/address.js";
@@ -125,14 +125,16 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
 
     if (config.cache?.source) {
       for (const plan of plans.values()) {
+        const cacheOptions: CachedSourceOptions = {
+          db,
+          chain: plan.chain,
+          finalizedHeight: () => runners.get(plan.chain)?.finalized,
+          onEvent: (e) => e.type !== "store" && obs!.metrics.recordCache("source", e.type === "hit"),
+        };
         plan.config = {
           ...plan.config,
-          source: cached(plan.config.source, {
-            db,
-            chain: plan.chain,
-            finalizedHeight: () => runners.get(plan.chain)?.finalized,
-            onEvent: (e) => e.type !== "store" && obs!.metrics.recordCache("source", e.type === "hit"),
-          }),
+          source: cached(plan.config.source, cacheOptions),
+          backfillSource: plan.config.backfillSource && cached(plan.config.backfillSource, cacheOptions),
         };
       }
     }
