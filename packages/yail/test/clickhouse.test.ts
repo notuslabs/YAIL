@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
@@ -33,6 +33,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await db?.close();
+  await ch.stop();
 });
 
 describe("clickhouse", () => {
@@ -123,6 +124,22 @@ describe("clickhouse", () => {
       { wallet: "0xaaa", label: "whale", rank: 1, _yail_chain: "base", _yail_block: "7", _yail_version: "9" },
     ]);
     await own.close();
+  });
+
+  it("drops the databases it named, views included, when stopped on a YAIL_TEST_CLICKHOUSE_URL server", async () => {
+    vi.stubEnv("YAIL_TEST_CLICKHOUSE_URL", ch.url);
+    vi.resetModules();
+    const testing = await import("../src/testing/index.js");
+    const server = await testing.startTestClickHouse();
+    const scratch = createDb(server.database());
+    const counts = table("counts", { n: t.uint64() }, { orderBy: ["n"], indexMeta: false });
+    const countsMv = materializedView("counts_mv", { from: events, to: counts, query: sql`SELECT count() AS n FROM ${events}`, refresh: { schedule: "EVERY 1 HOUR" } });
+    await migrate(scratch, { events, counts, countsMv });
+    await scratch.close();
+    await server.stop();
+    vi.unstubAllEnvs();
+    expect(await db.query(sql`SELECT name FROM system.databases WHERE name = ${scratch.database}`)).toEqual([]);
+    expect(await db.query(sql`SELECT view FROM system.view_refreshes WHERE database = ${scratch.database}`)).toEqual([]);
   });
 
   it("batch writer flushes per table and answers peek()", async () => {

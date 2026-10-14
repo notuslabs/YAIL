@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseConfig } from "../db/client.js";
+import { createDb, type DatabaseConfig } from "../db/client.js";
 
 export { fixtureSource, readFixture, writeFixture, recordEvmFixture, recordBitcoinFixture, recordSolanaFixture } from "../sources/fixture.js";
 export type { Fixture, EvmFixture, BitcoinFixture, SolanaFixture } from "../sources/fixture.js";
@@ -11,6 +11,7 @@ export interface TestClickHouse {
   url: string;
   /** `database` config for an isolated database (created by migrate). */
   database(config?: Partial<DatabaseConfig>): DatabaseConfig;
+  /** Stops the container, or on a `YAIL_TEST_CLICKHOUSE_URL` server drops every database `database()` named, views included. */
   stop(): Promise<void>;
 }
 
@@ -24,7 +25,7 @@ let shared: Promise<TestClickHouse> | undefined;
 export function startTestClickHouse(options: { image?: string } = {}): Promise<TestClickHouse> {
   shared ??= (async () => {
     const envUrl = process.env.YAIL_TEST_CLICKHOUSE_URL;
-    if (envUrl) return make(envUrl, async () => {});
+    if (envUrl) return make(envUrl, dropDatabases);
     let ClickHouseContainer: (typeof import("@testcontainers/clickhouse"))["ClickHouseContainer"];
     try {
       ({ ClickHouseContainer } = await import("@testcontainers/clickhouse"));
@@ -43,16 +44,28 @@ export function startTestClickHouse(options: { image?: string } = {}): Promise<T
   return shared;
 }
 
-function make(url: string, stop: () => Promise<void>): TestClickHouse {
+function make(url: string, stop: (url: string, databases: string[]) => Promise<void>): TestClickHouse {
   const u = new URL(url);
   let auth = "";
   if (u.username) auth = `${u.username}:${u.password}@`;
   const base = `${u.protocol}//${auth}${u.host}`;
+  const databases: string[] = [];
   return {
     url: base,
     database(config) {
-      return { url: base, database: `yail_test_${randomUUID().slice(0, 8)}`, ...config };
+      const database = `yail_test_${randomUUID().slice(0, 8)}`;
+      databases.push(database);
+      return { url: base, database, ...config };
     },
-    stop,
+    stop: () => stop(base, databases),
   };
+}
+
+async function dropDatabases(url: string, databases: string[]): Promise<void> {
+  const db = createDb({ url });
+  try {
+    for (const database of databases) await db.command(`DROP DATABASE IF EXISTS \`${database}\` SYNC`);
+  } finally {
+    await db.close();
+  }
 }

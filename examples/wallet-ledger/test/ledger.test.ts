@@ -1,6 +1,6 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addressSet, createConfig, createIndexer, sql, type DatabaseConfig, type Indexer } from "@notuslabs/yail";
-import { fixtureSource, readFixture, startTestClickHouse, type BitcoinFixture, type EvmFixture } from "@notuslabs/yail/testing";
+import { fixtureSource, readFixture, startTestClickHouse, type BitcoinFixture, type EvmFixture, type TestClickHouse } from "@notuslabs/yail/testing";
 import { erc20Abi } from "../src/abis.js";
 import { onBitcoinTransaction, onTransaction, onTransfer } from "../src/handlers.js";
 import { balanceSeries } from "../src/queries.js";
@@ -27,15 +27,21 @@ const testConfig = (database: DatabaseConfig) =>
     server: { port: false },
   });
 
+let ch: TestClickHouse;
 let indexer: Indexer<ReturnType<typeof testConfig>>;
 
 beforeAll(async () => {
-  const ch = await startTestClickHouse();
+  ch = await startTestClickHouse();
   indexer = createIndexer({ config: testConfig(ch.database()), schema });
   indexer.on("Erc20:Transfer", onTransfer);
   indexer.on("Wallets:transaction", onTransaction);
   indexer.on("BtcWallets:transaction", onBitcoinTransaction);
   await indexer.run();
+});
+
+afterAll(async () => {
+  await indexer.db.close();
+  await ch.stop();
 });
 
 describe("wallet ledger", () => {

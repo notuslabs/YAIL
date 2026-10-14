@@ -58,6 +58,9 @@ let ch: TestClickHouse;
 beforeAll(async () => {
   ch = await startTestClickHouse();
 });
+afterAll(async () => {
+  await ch.stop();
+});
 
 function makeIndexer(database: DatabaseConfig, opts: { fixture: ReturnType<typeof buildFixture>; source?: EvmSource; backfillSource?: EvmSource; cacheSource?: boolean; withFactory?: boolean }) {
   const config = createConfig({

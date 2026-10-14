@@ -276,6 +276,7 @@ HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up o
 import { startTestClickHouse, fixtureSource, readFixture } from "@notuslabs/yail/testing";
 
 const ch = await startTestClickHouse();               // YAIL_TEST_CLICKHOUSE_URL or a testcontainer
+afterAll(() => ch.stop());                             // stops the container, or drops the databases ch.database() named
 const fixture = readFixture("test/fixtures/base-univ3-weth-usdc.json");
 const config = createConfig({ database: ch.database(), chains: { base: { id: 8453, source: fixtureSource(fixture), finality: 0 } }, contracts: { … } });
 const indexer = createIndexer({ config, schema });
