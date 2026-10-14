@@ -1,5 +1,5 @@
 import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, FetchOptions } from "./types.js";
-import { mapLimit, request } from "../util.js";
+import { counted, mapLimit, request, requestListeners } from "../util.js";
 
 export interface EsploraOptions {
   /** Esplora-compatible base URL: https://mempool.space/api or https://blockstream.info/api (or your own electrs). */
@@ -30,7 +30,8 @@ interface EsploraTx {
  * transactions inside [fromBlock, toBlock).
  */
 export function esplora(options: EsploraOptions): BitcoinSource {
-  const doFetch = options.fetch ?? fetch;
+  const listeners = requestListeners();
+  const doFetch = counted(options.fetch ?? fetch, listeners.count);
   const base = options.url.replace(/\/$/, "");
   const concurrency = options.concurrency ?? 2;
 
@@ -101,6 +102,7 @@ export function esplora(options: EsploraOptions): BitcoinSource {
         start = end - size;
       }
     },
+    onRequest: listeners.onRequest,
   };
 }
 

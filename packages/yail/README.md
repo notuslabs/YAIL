@@ -171,6 +171,8 @@ indexer.on("Program:SwapEvent", ...)  // Solana event: { data, address, transact
 indexer.on("setup", ...)              // once per chain before indexing starts
 ```
 
+An account's events are typed by the kind of its chain, an optional key (`{ solana?: … }`, a chain configured only sometimes) included. TypeScript drops the names of a map built at runtime (`Object.fromEntries(…)`) when it is spread next to other keys, in `chains` and in the `chain` map of a contract, account or program alike. Chains dropped from `chains` are typed EVM. A spread `chain` map keeps only its other keys: an account on `{ ...Object.fromEntries(…), solana: … }` gets Solana events alone in its type, though it also runs on the map's chains, and `context.chain.name` misses them. Merge such a map with `Object.assign(map, { bitcoin: … })`, which keeps its index signature, or give it literal keys, and keep each account on chains of one kind: the chains of a `chain` map built at runtime take the kind of the `chains` index signature, EVM when it has none.
+
 On Solana a "block" is a slot. An event is a transaction that changed the wallet's SOL or the tokens of an account it owns: `lamports` is the wallet's SOL change (fee included when it paid), `tokens` the change per token account, `balances` the rows before and after. Every Solana source reports the same rows (an account is listed only where its SOL or tokens changed); `transactionIndex` orders transactions within a slot, though HyperSync counts only non-vote transactions and RPC counts all of them.
 
 Writes are buffered per source batch and flushed as one INSERT per table before the checkpoint is written. Events are processed in `(block, txIndex, logIndex)` order per chain; chains run concurrently. Only events with a registered handler are fetched from the source.
@@ -327,6 +329,7 @@ Logs are [evlog](https://www.evlog.dev) wide events: one per batch (chain, block
 | `yail.jobs` (counter, by outcome) | `outcome=failed` |
 | `yail.batch.duration`, `yail.handler.duration`, `yail.flush.duration` | latency histograms |
 | `yail.cache.events` | hit/miss by cache |
+| `yail.source.requests` (counter, per chain) | a rate near the provider's limit (HyperSync: per token per minute; the EVM HyperSync client's own retries are not counted, so the real rate is higher while it gets 429s) |
 
 Export everything with one call:
 
@@ -336,7 +339,7 @@ startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:
 ```
 Set `observability.otlpEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to ship logs over OTLP too, and `observability.logsToClickHouse: true` to keep them in `_yail_logs` next to your data (zero extra infrastructure). Recent events are always available at `GET /_evlog/logs`.
 
-HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`.
+HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` counts the requests each chain's sources sent (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains): every HTTP attempt, retries included, except for EVM `hypersync()`, which counts its client's calls and stream responses and cannot see the retries the client makes on its own (`maxNumRetries`). A source of your own reports them through `onRequest`.
 
 ### Testing with real data
 

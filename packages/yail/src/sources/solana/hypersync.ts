@@ -1,5 +1,5 @@
 import type { FetchOptions, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaInstructionFilter, SolanaLog, SolanaQuery, SolanaSource, SolanaTransaction } from "../types.js";
-import { chunkList, request, sleep } from "../../util.js";
+import { chunkList, counted, request, requestListeners, sleep } from "../../util.js";
 import { finishBatch, solanaBalance } from "./shared.js";
 
 export interface SolanaHypersyncOptions {
@@ -90,7 +90,8 @@ interface WindowRequest {
  */
 export function solanaHypersync(options: SolanaHypersyncOptions): SolanaSource {
   const base = (options.url ?? "https://solana.hypersync.xyz").replace(/\/$/, "");
-  const doFetch = options.fetch ?? fetch;
+  const listeners = requestListeners();
+  const doFetch = counted(options.fetch ?? fetch, listeners.count);
   const concurrency = options.concurrency ?? 16;
   let floor: number | undefined;
 
@@ -223,6 +224,7 @@ export function solanaHypersync(options: SolanaHypersyncOptions): SolanaSource {
         yield finishBatch(batch);
       }
     },
+    onRequest: listeners.onRequest,
   };
 }
 

@@ -108,6 +108,12 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
     db = createDb(config.database);
     await migrate(db, options.schema);
     obs = await initObservability(config.observability, { db, dbConfig: config.database });
+    const { metrics } = obs;
+    for (const [name, chain] of Object.entries(config.chains)) {
+      const listener = () => metrics.recordSourceRequest(name);
+      chain.source.onRequest?.(listener);
+      chain.backfillSource?.onRequest?.(listener);
+    }
     http = createHttpClient({ db, persist: config.cache?.http !== false, fetch: options.fetch, onCache: (hit) => obs!.metrics.recordCache("http", hit) });
     registry = new AddressRegistry(db, normalize);
     await registry.load();
@@ -281,7 +287,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
       const snap = need(obs, "observability").metrics.snapshot();
       const chains: StatusSnapshot["chains"] = {};
       for (const [name, r] of runners) {
-        const s = snap.chains[name] ?? { cursor: r.cursor, head: r.head, finalized: r.finalized, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, lastBatchMs: 0, caughtUp: r.caughtUp };
+        const s = snap.chains[name] ?? { cursor: r.cursor, head: r.head, finalized: r.finalized, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, sourceRequests: 0, lastBatchMs: 0, caughtUp: r.caughtUp };
         chains[name] = { ...s, cursor: r.cursor, head: r.head, finalized: r.finalized, caughtUp: r.caughtUp, running: r.running, error: r.error?.message, pendingJobs: jobRunners.get(name)?.pending ?? 0 };
       }
       return { chains, addresses: await need(registry, "addresses").counts(), counters: snap.counters };

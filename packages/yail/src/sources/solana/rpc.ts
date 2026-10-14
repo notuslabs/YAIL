@@ -1,5 +1,5 @@
 import type { FetchOptions, SolanaQuery, SolanaSource } from "../types.js";
-import { mapLimit } from "../../util.js";
+import { counted, mapLimit, requestListeners } from "../../util.js";
 import { accountKeys, jsonRpc, orderInSlots, toBatch, type RawTransaction } from "./json-rpc.js";
 import { finishBatch } from "./shared.js";
 
@@ -31,7 +31,8 @@ export const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "T
  * HyperSync's first slot fails loudly instead of indexing nothing.
  */
 export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
-  const call = jsonRpc(`rpc(${new URL(options.url).host})`, options);
+  const listeners = requestListeners();
+  const call = jsonRpc(`rpc(${new URL(options.url).host})`, { ...options, fetch: counted(options.fetch ?? fetch, listeners.count) });
   const concurrency = options.concurrency ?? 4;
   /** Token accounts (account, owner) seen in each transaction read so far, for closed-account discovery. */
   const tokenAccountsIn = new Map<string, Array<[string, string]>>();
@@ -98,6 +99,7 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
       await orderInSlots([...txs.values()], call, concurrency, signal);
       yield finishBatch(toBatch([...txs.values()], wallets, owners, query));
     },
+    onRequest: listeners.onRequest,
   };
 }
 

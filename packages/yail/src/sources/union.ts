@@ -45,6 +45,12 @@ export function union<S extends Source>(...sources: [S, ...S[]]): S {
     async firstBlock() {
       return Math.min(...(await firstBlocks()));
     },
+    onRequest(listener: () => void) {
+      const removals = sources.flatMap((source) => source.onRequest?.(listener) ?? []);
+      return () => {
+        for (const remove of removals) remove();
+      };
+    },
     async *fetch(query: QueryOf<S>, options?: FetchOptions): AsyncIterable<BatchOf<S>> {
       const starts = await firstBlocks();
       let from = query.fromBlock;
