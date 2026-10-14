@@ -226,6 +226,8 @@ curl -X POST :42069/addresses -d '{"set":"wallets","address":["0xabc…"]}'
 
 What happens: the live loop adopts the address at its current block `N` and includes it from then on; a job backfills `[fromBlock, N)` with a query restricted to that address; the address flips to `live`. No gaps, no double processing. Progress is visible on `/status` and `/jobs`. Handlers see `context.backfill === true` during the backfill.
 
+A job that throws (a source or ClickHouse outage, a handler error) is retried up to 8 times: 30 s after the first failure, then twice as long after each one, about an hour in all. The wait lives in memory, so after a restart a pending job runs at once. When an address backfill fails for good, the address becomes `failed` and stays live: `failed` only means its history is incomplete. Registering it again re-runs that history. Find them with `SELECT * FROM _yail_addresses FINAL WHERE status = 'failed'`.
+
 `factory({ address, event, parameter })` (Ponder style) discovers child contracts from a factory event; children found inside a batch have their logs fetched for the rest of that batch, so ordering is exact.
 
 ### Re-indexing

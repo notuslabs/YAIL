@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseAbi } from "viem";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -8,7 +8,7 @@ import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
 import { internalTables } from "../src/db/index.js";
 import type { DatabaseConfig } from "../src/db/client.js";
-import type { EvmQuery, EvmSource } from "../src/sources/types.js";
+import type { EvmBatch, EvmQuery, EvmSource, FetchOptions } from "../src/sources/types.js";
 import { FixtureBuilder, addr } from "./helpers.js";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
@@ -31,7 +31,7 @@ const W2 = addr(0x2);
 const W3 = addr(0x3);
 const OTHER = addr(0x9);
 
-function buildFixture(height = 120) {
+function fixtureBuilder(height: number) {
   const fb = new FixtureBuilder(height);
   fb.transfer(5, TOKEN, OTHER, W1, 100n);
   fb.transfer(10, TOKEN, W1, W2, 40n);
@@ -47,7 +47,11 @@ function buildFixture(height = 120) {
   fb.transfer(55, POOL_B, addr(0x10), addr(0x11), 4n); // now a child
   fb.transfer(60, TOKEN, W2, OTHER, 1n);
   fb.transfer(115, TOKEN, OTHER, W1, 3n); // above the finalized head (120 - 10): not indexed until the head moves
-  return fb.build();
+  return fb;
+}
+
+function buildFixture(height = 120) {
+  return fixtureBuilder(height).build();
 }
 
 let ch: TestClickHouse;
@@ -318,6 +322,134 @@ describe("backfillSource", () => {
     expect(live.queries.length).toBeGreaterThan(0);
     expect(live.queries.filter((q) => q.fromBlock < 111)).toEqual([]);
     expect((await balances(indexer))[W3]).toEqual({ total: 5n, n: 2 });
+    await indexer.db.close();
+  });
+});
+
+describe("jobs", () => {
+  afterEach(() => {
+    useRealClock();
+  });
+
+  /**
+   * Fake timers two hours behind, so the rows written on them never shadow the ones written in real time after them.
+   * Returns a count of the timers set since, by delay.
+   */
+  function useFakeClock(): (delayMs: number) => number {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now: Date.now() - 2 * 3_600_000, shouldClearNativeTimers: true });
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    return (delayMs) => timers.mock.calls.filter(([, ms]) => ms === delayMs).length;
+  }
+
+  function useRealClock() {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  }
+
+  /**
+   * Fires due fake timers, moving the clock `stepMs` at a time, until `condition` holds. The clock stays put by
+   * default; the ClickHouse client waits on a 0 ms timer before every request.
+   */
+  async function until(condition: () => boolean, stepMs = 0) {
+    const deadline = performance.now() + 20_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error("condition not met within 20 s");
+      await vi.advanceTimersByTimeAsync(stepMs);
+    }
+  }
+
+  async function drive<T>(promise: Promise<T>, stepMs = 0): Promise<T> {
+    let settled = false;
+    promise.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await until(() => settled, stepMs);
+    return promise;
+  }
+
+  /** `onBatch(call, batch)` runs before each batch of each fetch is handed over: it may throw, or never return. */
+  function intercepted(source: EvmSource, onBatch: (call: number, batch: number) => Promise<void> | void) {
+    const calls: Array<{ at: number; fromBlock: number }> = [];
+    const wrapped: EvmSource = {
+      ...source,
+      async *fetch(query: EvmQuery, options?: FetchOptions): AsyncIterable<EvmBatch> {
+        calls.push({ at: Date.now(), fromBlock: query.fromBlock });
+        const call = calls.length;
+        let batch = 0;
+        for await (const b of source.fetch(query, options)) {
+          await onBatch(call, batch++);
+          yield b;
+        }
+      },
+    };
+    return { calls, source: wrapped };
+  }
+
+  /** Registers W3 on a caught-up database and starts its backfill job (W3 has history at blocks 20 and 30). */
+  async function backfillW3(database: DatabaseConfig, fixture: ReturnType<typeof buildFixture>, backfillSource: EvmSource) {
+    const { indexer } = makeIndexer(database, { fixture, backfillSource });
+    await indexer.init();
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    await indexer.internals.runners.get("test")!.runLoop({ once: true });
+    const jobs = indexer.internals.jobs.get("test")!;
+    jobs.start();
+    return { indexer, jobs };
+  }
+
+  it("retries a failed job after 30 s, then 60 s, until it succeeds", async () => {
+    const database = await caughtUp();
+    const history = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }), (call) => {
+      if (call <= 2) throw new Error("source unavailable");
+    });
+    const scheduled = useFakeClock();
+    const { indexer, jobs } = await drive(backfillW3(database, buildFixture(), history.source));
+    for (const delayMs of [30_000, 60_000]) {
+      await until(() => scheduled(delayMs) === 1);
+      await vi.advanceTimersByTimeAsync(delayMs);
+    }
+    await until(() => jobs.pending === 0);
+    await drive(jobs.stop(), 1_000);
+    useRealClock();
+    expect(history.calls.map((c) => c.at - history.calls[0]!.at)).toEqual([0, 30_000, 90_000]);
+    const [job] = await indexer.db.rows(internalTables.jobs);
+    expect([job!.status, job!.attempts]).toEqual(["done", 3]);
+    expect((await balances(indexer))[W3]).toEqual({ total: 5n, n: 2 });
+    await indexer.db.close();
+  });
+
+  it("keeps an address live when its backfill fails for good, and re-runs its history when it is registered again", async () => {
+    const database = await caughtUp();
+    const fb = fixtureBuilder(140);
+    fb.transfer(125, TOKEN, OTHER, W3, 1n);
+    const fixture = fb.build();
+    fixture.height = 120;
+    let failing = true;
+    const history = intercepted(fixtureSource(fixture, { blocksPerBatch: 25 }), () => {
+      if (failing) throw new Error("source unavailable");
+    });
+    const scheduled = useFakeClock();
+    const { indexer, jobs } = await drive(backfillW3(database, fixture, history.source));
+    for (const delayMs of [30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000]) {
+      await until(() => scheduled(delayMs) === 1);
+      await vi.advanceTimersByTimeAsync(delayMs);
+    }
+    await until(() => jobs.pending === 0);
+    await drive(jobs.stop(), 1_000);
+    useRealClock();
+    expect(history.calls.map((c) => c.at - history.calls[0]!.at)).toEqual([0, 30_000, 90_000, 210_000, 450_000, 930_000, 1_890_000, 3_810_000]);
+    expect(indexer.addresses.list({ set: "wallets", status: "failed" }).map((r) => r.address)).toEqual([W3]);
+    expect(indexer.internals.registry.live("wallets", "test")).toContain(W3);
+
+    fixture.height = 140;
+    await indexer.internals.runners.get("test")!.runLoop({ once: true });
+    expect((await indexer.db.rows(ledger, sql`WHERE wallet = ${W3}`)).map((r) => [r.block, r.mode])).toEqual([[125n, "live"]]);
+
+    failing = false;
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    await indexer.run();
+    expect((await balances(indexer))[W3]).toEqual({ total: 7n - 2n + 1n, n: 3 });
+    expect(indexer.addresses.list({ set: "wallets", status: "live" }).map((r) => r.address)).toContain(W3);
     await indexer.db.close();
   });
 });

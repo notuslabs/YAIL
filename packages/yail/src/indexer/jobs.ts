@@ -8,6 +8,9 @@ import { INDEX_META_COLUMNS } from "../schema/table.js";
 import type { Observability } from "../observability/logger.js";
 import type { ChainRunner } from "./runtime.js";
 
+/** A failed job is retried after 30 s, then after twice the previous wait: about an hour over all attempts. */
+const MAX_JOB_ATTEMPTS = 8;
+
 export type JobRow = InferRow<typeof jobsTable>;
 export type JobKind = JobRow["kind"];
 
@@ -33,6 +36,7 @@ export interface ReindexScopePayload {
  */
 export class JobRunner {
   private queue: JobRow[] = [];
+  private delayed = new Map<string, NodeJS.Timeout>();
   private active = 0;
   private stopped = false;
   private wake: (() => void) | undefined;
@@ -49,7 +53,7 @@ export class JobRunner {
   }
 
   get pending(): number {
-    return this.queue.length + this.active;
+    return this.queue.length + this.active + this.delayed.size;
   }
 
   async enqueue(kind: JobKind, payload: BackfillAddressPayload | ReindexRangePayload | ReindexScopePayload): Promise<JobRow> {
@@ -67,7 +71,7 @@ export class JobRunner {
     const known = new Set(this.queue.map((j) => j.id));
     let added = 0;
     for (const r of rows) {
-      if (known.has(r.id) || this.runningIds.has(r.id)) continue;
+      if (known.has(r.id) || this.runningIds.has(r.id) || this.delayed.has(r.id)) continue;
       this.queue.push(r);
       added++;
     }
@@ -82,18 +86,21 @@ export class JobRunner {
     this.loopPromise ??= this.loop();
   }
 
+  /** Pending retries are dropped: their jobs stay pending in `_yail_jobs` and run as soon as a runner polls them. */
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const timer of this.delayed.values()) clearTimeout(timer);
+    this.delayed.clear();
     this.wake?.();
     await this.loopPromise;
     this.loopPromise = undefined;
   }
 
-  /** Resolve once the queue is empty and no job is running. */
+  /** Resolve once no job is queued, running or waiting to be retried. */
   async drain(): Promise<void> {
     for (;;) {
       await this.poll();
-      if (this.queue.length === 0 && this.active === 0) return;
+      if (this.pending === 0) return;
       await new Promise((r) => setTimeout(r, 50));
     }
   }
@@ -137,7 +144,7 @@ export class JobRunner {
       obs.metrics.recordJob(job.kind, "done");
       wide.set({ outcome: "done" });
     } catch (err) {
-      const retry = job.attempts < 3;
+      const retry = job.attempts < MAX_JOB_ATTEMPTS;
       job.status = "failed";
       if (retry) job.status = "pending";
       job.error = (err as Error).message;
@@ -146,7 +153,7 @@ export class JobRunner {
       obs.metrics.recordError(this.chain, "job");
       wide.error(err as Error);
       wide.set({ outcome: job.status, attempts: job.attempts });
-      if (retry) this.queue.push(job);
+      if (retry) wide.set({ retryInMs: this.retryLater(job) });
       else if (job.kind === "backfill_address") {
         const p = job.payload as unknown as BackfillAddressPayload;
         await this.deps.registry.update(p.set, this.chain, p.address, { status: "failed", error: job.error });
@@ -154,6 +161,17 @@ export class JobRunner {
     } finally {
       wide.emit();
     }
+  }
+
+  private retryLater(job: JobRow): number {
+    const delayMs = Math.min(3_600_000, 30_000 * 2 ** (job.attempts - 1));
+    const timer = setTimeout(() => {
+      this.delayed.delete(job.id);
+      this.queue.push(job);
+      this.wake?.();
+    }, delayMs);
+    this.delayed.set(job.id, timer);
+    return delayMs;
   }
 
   private async backfillAddress(p: BackfillAddressPayload): Promise<void> {
