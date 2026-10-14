@@ -58,10 +58,17 @@ export function viewDdl(view: View, database?: string): string {
   return `CREATE OR REPLACE VIEW ${qualify(view.name, database)} AS\n${text}`;
 }
 
-/** One-off backfill of a materialized view's target from existing source data. */
+/**
+ * One-off backfill of a materialized view's target from existing source data. Every column of the target, the
+ * `_yail_*` ones included when it has them, is selected from the query by name, so a query that orders its columns
+ * differently still stores each value in its own column, and one that lacks a column fails.
+ */
 export function materializedViewPopulateSql(view: MaterializedView, database?: string): string {
   const { text } = renderSql(view.refresh?.populate ?? view.query, { inline: true, database });
-  return `INSERT INTO ${qualify(view.to.name, database)}\n${text}`;
+  const names = view.to.columnKeys.map((key) => view.to.columnName(key));
+  if (view.to.options.indexMeta !== false) names.push(...Object.values(INDEX_META_COLUMNS));
+  const columns = names.map((name) => `\`${name}\``).join(", ");
+  return `INSERT INTO ${qualify(view.to.name, database)} (${columns})\nSELECT ${columns}\nFROM (\n${text}\n)`;
 }
 
 function settingValue(v: string | number): string {

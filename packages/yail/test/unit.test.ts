@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseAbi } from "viem";
-import { t, table, materializedView, tableDdl, materializedViewDdl, view, viewDdl } from "../src/schema/index.js";
+import { t, table, materializedView, tableDdl, materializedViewDdl, materializedViewPopulateSql, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
 import { serializeRow, deserializeRow } from "../src/db/serialize.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
@@ -84,6 +84,16 @@ describe("schema", () => {
     expect(ddl).toContain("CREATE MATERIALIZED VIEW IF NOT EXISTS `db`.`ledger_daily_mv` TO `db`.`daily` AS");
     expect(ddl).toContain("FROM `db`.`ledger`");
     expect(tableDdl(daily)).toContain("ENGINE = SummingMergeTree()");
+  });
+
+  it("populates a view's target by column name", () => {
+    const daily = table("daily", { wallet: t.address(), day: t.date(), amount: t.int256() }, { orderBy: ["wallet", "day"], indexMeta: false });
+    const mv = materializedView("ledger_daily_mv", { from: ledger, to: daily, query: sql`SELECT toDate(block_time) AS day, wallet, sum(amount) AS amount FROM ${ledger} GROUP BY wallet, day` });
+    expect(materializedViewPopulateSql(mv, "db")).toBe(
+      "INSERT INTO `db`.`daily` (`wallet`, `day`, `amount`)\nSELECT `wallet`, `day`, `amount`\nFROM (\nSELECT toDate(block_time) AS day, wallet, sum(amount) AS amount FROM `db`.`ledger` GROUP BY wallet, day\n)",
+    );
+    const copy = materializedView("ledger_copy_mv", { from: ledger, to: ledger, query: sql`SELECT * FROM ${ledger}` });
+    expect(materializedViewPopulateSql(copy)).toContain("(`chain`, `wallet`, `tx_hash`, `log_index`, `amount`, `block_time`, `note`, `tags`, `_yail_chain`, `_yail_block`, `_yail_version`)");
   });
 
   it("renders plain views that read tables and earlier views", () => {

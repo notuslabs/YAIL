@@ -136,6 +136,9 @@ export const dailyMv = materializedView("wallet_daily_mv", {
   re-run their SELECT on a schedule into a real table, so they can join across rows and tables, which an insert-time
   view cannot. With `append` the query covers a recent window and the target's ReplacingMergeTree key dedups it;
   `populate` is the unwindowed query `yail migrate --populate` runs once for the history. ClickHouse >= 24.
+- `yail migrate --populate` fills a view's target by column name: it selects each of the target's columns from the
+  query by name (the `_yail_*` ones too, unless the target has `indexMeta: false`). The order of the query's columns
+  does not matter, and a column the query lacks fails the populate instead of shifting the others.
 - Plain views (``view("balances", sql`SELECT … FROM ${ledger} FINAL …`)``) hold no data: they run on every read, so they
   always agree with their tables. `yail migrate` creates or replaces them, each after the views it reads.
 
