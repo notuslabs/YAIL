@@ -8,6 +8,7 @@ import { parseAbi } from "viem";
 import { startTestClickHouse, readFixture, fixtureSource, type TestClickHouse, type EvmFixture, type BitcoinFixture, type SolanaFixture } from "../src/testing/index.js";
 import { union } from "../src/sources/union.js";
 import { createConfig, addressSet } from "../src/config/index.js";
+import { anchorEvent, b, decode, instruction, programLog } from "../src/solana/index.js";
 import { createIndexer } from "../src/indexer/indexer.js";
 import type { HandlerContext } from "../src/indexer/context.js";
 import { t, table } from "../src/schema/index.js";
@@ -238,5 +239,115 @@ describe("Solana wallet via union(HyperSync, RPC)", () => {
     for (const [account, token] of Object.entries(expected.tokens)) expect(totals.get(account) ?? 0n, `${token.mint} in ${account}`).toBe(token.amount);
     // Token accounts closed since: everything that came in went out.
     for (const r of rows) if (r.mint !== "" && !expected.tokens[r.account]) expect(BigInt(r.total), `closed ${r.account}`).toBe(0n);
+  });
+});
+
+describe("Raydium CLMM on Solana", () => {
+  const fixture = readFixture<SolanaFixture>(`${fixtures}solana-raydium-clmm.json`);
+  const expected = fixture.expected as { program: string; readSlot: number; pools: Record<string, { sqrtPriceX64: bigint; liquidity: bigint }> };
+  const poolState = table("clmm_pool_state", { pool: t.string(), sqrtPriceX64: t.uint256(), liquidity: t.uint256(), slot: t.uint64() }, { orderBy: ["pool"] });
+  let db: Db | undefined;
+  afterAll(async () => {
+    await db?.close();
+  });
+
+  it("leaves each pool at the price and liquidity its PoolState account holds", async () => {
+    const swapEvent = b.struct({
+      poolState: b.pubkey,
+      sender: b.pubkey,
+      tokenAccount0: b.pubkey,
+      tokenAccount1: b.pubkey,
+      amount0: b.u64,
+      transferFee0: b.u64,
+      amount1: b.u64,
+      transferFee1: b.u64,
+      zeroForOne: b.bool,
+      sqrtPriceX64: b.u128,
+      liquidity: b.u128,
+      tick: b.i32,
+    });
+    const config = createConfig({
+      database: ch.database(),
+      chains: { solana: { id: "solana", source: fixtureSource(fixture, { blocksPerBatch: 50 }), finality: 0 } },
+      programs: { RaydiumClmm: { chain: "solana", address: expected.program, startBlock: fixture.fromBlock, endBlock: fixture.toBlock - 1, events: { SwapEvent: anchorEvent("SwapEvent", swapEvent) } } },
+      server: { port: false },
+      observability: { pretty: false },
+    });
+    const indexer = createIndexer({ config, schema: { poolState } });
+    let swaps = 0;
+    indexer.on("RaydiumClmm:SwapEvent", ({ event, context }) => {
+      swaps++;
+      const { poolState: pool, sqrtPriceX64, liquidity } = event.data;
+      context.db.insert(poolState).values({ pool, sqrtPriceX64, liquidity, slot: BigInt(event.block.slot) });
+    });
+    await indexer.run();
+    db = indexer.db;
+    expect(swaps).toBeGreaterThan(500);
+    const pools = Object.entries(expected.pools);
+    expect(pools.length).toBeGreaterThanOrEqual(10);
+    for (const [pool, onChain] of pools) {
+      const state = await indexer.db.find(poolState, { pool });
+      expect(state, pool).toMatchObject({ sqrtPriceX64: onChain.sqrtPriceX64, liquidity: onChain.liquidity });
+    }
+  });
+});
+
+describe("Raydium AMM v4 on Solana, before log lines had instruction addresses", () => {
+  const fixture = readFixture<SolanaFixture>(`${fixtures}solana-raydium-amm-v4.json`);
+  const swapIn = b.struct({ amountIn: b.u64, minimumAmountOut: b.u64 });
+  const swapOut = b.struct({ maxAmountIn: b.u64, amountOut: b.u64 });
+  /** Swap ray_logs: 57 bytes, type 3 (SwapBaseIn) or 4 (SwapBaseOut), then the instruction's two arguments, then the reserves. */
+  const swapLogs = (logs: Array<{ message: string }>) =>
+    logs.flatMap((l) => {
+      const text = programLog(l.message);
+      if (!text.startsWith("ray_log: ")) return [];
+      const bytes = Buffer.from(text.slice("ray_log: ".length), "base64");
+      return bytes.length === 57 && (bytes[0] === 3 || bytes[0] === 4) ? [bytes] : [];
+    });
+
+  it("pairs the k-th swap ray_log of a transaction with the swap of ordinal k", async () => {
+    const config = createConfig({
+      database: ch.database(),
+      chains: { solana: { id: "solana", source: fixtureSource(fixture, { blocksPerBatch: 20 }), finality: 0 } },
+      programs: {
+        RaydiumAmmV4: {
+          chain: "solana",
+          address: "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+          startBlock: fixture.fromBlock,
+          endBlock: fixture.toBlock - 1,
+          includeLogs: true,
+          instructions: {
+            swapBaseIn: instruction({ discriminator: "09", args: swapIn }),
+            swapBaseOut: instruction({ discriminator: "0b", args: swapOut }),
+            swapBaseInV2: instruction({ discriminator: "10", args: swapIn }),
+            swapBaseOutV2: instruction({ discriminator: "11", args: swapOut }),
+          },
+        },
+      },
+      server: { port: false },
+      observability: { pretty: false },
+    });
+    const indexer = createIndexer({ config, schema: {} });
+    const outcome = { matched: 0, mismatched: 0, skipped: 0, laterInTransaction: 0 };
+    const pair = (event: { ordinal: number; programInstructions: unknown[]; programLogs: Array<{ message: string; instructionAddress: number[] | null }> }, logType: number, matches: (args: Uint8Array) => boolean) => {
+      expect(event.programLogs.every((l) => l.instructionAddress === null)).toBe(true);
+      const logs = swapLogs(event.programLogs);
+      if (logs.length !== event.programInstructions.length) {
+        outcome.skipped++;
+        return;
+      }
+      if (event.ordinal > 0) outcome.laterInTransaction++;
+      const log = logs[event.ordinal]!;
+      if (log[0] === logType && matches(log.subarray(1))) outcome.matched++;
+      else outcome.mismatched++;
+    };
+    indexer.on("RaydiumAmmV4:swapBaseIn", ({ event }) => pair(event, 3, (args) => decode(swapIn, args).amountIn === event.args.amountIn));
+    indexer.on("RaydiumAmmV4:swapBaseInV2", ({ event }) => pair(event, 3, (args) => decode(swapIn, args).amountIn === event.args.amountIn));
+    indexer.on("RaydiumAmmV4:swapBaseOut", ({ event }) => pair(event, 4, (args) => decode(swapOut, args).amountOut === event.args.amountOut));
+    indexer.on("RaydiumAmmV4:swapBaseOutV2", ({ event }) => pair(event, 4, (args) => decode(swapOut, args).amountOut === event.args.amountOut));
+    await indexer.run();
+    await indexer.db.close();
+    expect(outcome).toEqual({ matched: fixture.instructions!.length, mismatched: 0, skipped: 0, laterInTransaction: 1 });
+    expect(new Set(fixture.instructions!.map((i) => i.data.slice(0, 2)))).toEqual(new Set(["09", "0b", "10"]));
   });
 });
