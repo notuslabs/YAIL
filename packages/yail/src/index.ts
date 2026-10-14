@@ -9,8 +9,8 @@ export { createDb, sql, migrate, schemaDdl, BatchWriter, internalTables } from "
 export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index.js";
 
 // Sources
-export { hypersync, rpc, cached, esplora, union, fixtureSource } from "./sources/index.js";
-export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, SolanaInstruction, SolanaLog, SolanaInstructionFilter, SolanaLogFilter, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
+export { hypersync, rpc, helius, cached, esplora, union, fixtureSource } from "./sources/index.js";
+export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, SolanaInstruction, SolanaLog, SolanaInstructionFilter, SolanaLogFilter, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, HeliusOptions, EsploraOptions, CachedSourceOptions } from "./sources/index.js";
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";
