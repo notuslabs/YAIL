@@ -80,17 +80,18 @@ function node(txs: ChainTx[], { pageSize = 1000, withIndex = true, override }: N
   function history(address: string, config: any) {
     const owned = ownedBy(address);
     const { slot, tokenAccounts } = config.filters;
-    const changesOwnTokens = (tx: ChainTx) => Object.values(tx.tokens ?? {}).some((t) => t.owner === address && t.pre !== t.post);
     const matches = txs
-      .filter((tx) => touches(tx, address) || (tokenAccounts === "all" && [...owned].some((a) => touches(tx, a))) || (tokenAccounts === "balanceChanged" && changesOwnTokens(tx)))
+      .filter((tx) => touches(tx, address) || (tokenAccounts === "all" && [...owned].some((a) => touches(tx, a))))
       .filter((tx) => tx.slot >= slot.gte && tx.slot < slot.lt)
       .sort(byPosition);
     const [afterSlot, afterIndex] = (config.paginationToken ?? "-1:-1").split(":").map(Number);
     const rest = matches.filter((tx) => tx.slot > afterSlot || (tx.slot === afterSlot && tx.index > afterIndex));
     const page = rest.slice(0, Math.min(config.limit, pageSize));
     const last = page.at(-1);
+    const signature = (tx: ChainTx) => ({ signature: tx.signature, slot: tx.slot, transactionIndex: tx.index, err: null, memo: null, blockTime: raw(tx).blockTime, confirmationStatus: "confirmed" });
+    const full = (tx: ChainTx) => ({ ...raw(tx), ...(withIndex && { transactionIndex: tx.index }) });
     return {
-      data: page.map((tx) => ({ ...raw(tx), ...(withIndex && { transactionIndex: tx.index }) })),
+      data: config.transactionDetails === "signatures" ? page.map(signature) : page.map(full),
       paginationToken: rest.length > page.length && last ? `${last.slot}:${last.index}` : null,
     };
   }
@@ -182,20 +183,6 @@ describe("helius()", () => {
     ]);
   });
 
-  it("gives a token account its wallet from the transactions that name its owner", async () => {
-    const A = "TokenAcc111111111111111111111111111111111111";
-    const B = "TokenAcc222222222222222222222222222222222222";
-    const { fake } = node([
-      { signature: "received", slot: S + 1, index: 0, keys: [X, B, A], tokens: { [A]: { owner: W, pre: 0n, post: 7n }, [B]: { owner: X, pre: 7n, post: 0n } } },
-      { signature: "unnamed", slot: S + 2, index: 0, keys: [X, A], tokens: { [A]: { pre: 7n, post: 9n } } },
-    ]);
-    const [batch] = await batches(helius({ url: URL_WITH_KEY, fetch: fake }), { fromBlock: S, toBlock: S + 10, addresses: [W] });
-    expect(batch!.balances).toEqual([
-      { signature: "received", slot: S + 1, transactionIndex: 0, account: A, token: { mint: "M", owner: W, decimals: 6, pre: 0n, post: 7n } },
-      { signature: "unnamed", slot: S + 2, transactionIndex: 0, account: A, token: { mint: "M", owner: W, decimals: 6, pre: 7n, post: 9n } },
-    ]);
-  });
-
   it("reads slots below 111,491,819 like rpc({ kind: \"solana\" }), on the same URL", async () => {
     const A = "TokenAcc111111111111111111111111111111111111";
     const { fake, calls } = node([
@@ -211,10 +198,44 @@ describe("helius()", () => {
       [111_491_819, 111_492_000, ["new"]],
     ]);
     expect(list[0]!.balances.at(-1)!.token!.owner).toBe(W);
-    expect(calls.filter((c) => c.method === "getTransactionsForAddress").map((c) => c.params[1].filters.slot)).toEqual([{ gte: 111_491_819, lt: 111_492_000 }]);
+    expect(calls.filter((c) => c.method === "getTransactionsForAddress").map((c) => c.params[1])).toEqual([
+      { transactionDetails: "signatures", limit: 1, commitment: "confirmed", filters: { slot: { gte: 111_491_000, lt: 111_491_819 } } },
+      expect.objectContaining({ transactionDetails: "full", filters: { slot: { gte: 111_491_819, lt: 111_492_000 }, tokenAccounts: "all" } }),
+    ]);
     calls.length = 0;
     await batches(source, { fromBlock: 111_000_000, toBlock: 111_491_819, addresses: [W] });
-    expect(calls.map((c) => c.method)).not.toContain("getTransactionsForAddress");
+    expect(calls.filter((c) => c.method === "getTransactionsForAddress").map((c) => c.params[1].transactionDetails)).toEqual(["signatures"]);
+  });
+
+  it("reads below slot 111,491,819 only the wallets with a transaction of their own there", async () => {
+    const { fake, calls } = node([
+      { signature: "old", slot: 100_000_000, index: 0, keys: [W, X], lamports: { [W]: [100n, 90n] } },
+      { signature: "recent", slot: S + 1, index: 0, keys: [W2, X], lamports: { [W2]: [100n, 90n] } },
+    ]);
+    const list = await batches(helius({ url: URL_WITH_KEY, fetch: fake }), { fromBlock: 0, toBlock: S + 10, addresses: [W, W2] });
+    expect(list.map((b) => [b.fromBlock, b.nextBlock, b.transactions.map((t) => t.signature)])).toEqual([
+      [0, 111_491_819, ["old"]],
+      [111_491_819, S + 10, ["recent"]],
+    ]);
+    const askedOver = (method: string) => [...new Set(calls.filter((c) => c.method === method).map((c) => c.params[0]))];
+    expect([askedOver("getTokenAccountsByOwner"), askedOver("getSignaturesForAddress"), askedOver("getTransaction")]).toEqual([[W], [W], ["old"]]);
+  });
+
+  it("starts at the query's slot without rpc() when no wallet has a transaction below 111,491,819", async () => {
+    const own = (n: number): ChainTx => ({ signature: `own${n}`, slot: S + n, index: 0, keys: [W, X], lamports: { [W]: [100n, 90n] } });
+    const { fake, calls } = node(Array.from({ length: 500 }, (_, n) => own(n)));
+    const source = helius({ url: URL_WITH_KEY, fetch: fake });
+    const asked = () => calls.map((c) => [c.method, c.params[1]?.transactionDetails, c.params[1]?.filters?.slot]);
+    const list = await batches(source, { fromBlock: 0, toBlock: S + 10, addresses: [W] });
+    expect(list.map((b) => [b.fromBlock, b.nextBlock, b.transactions.length])).toEqual([[0, S + 10, 10]]);
+    expect(asked()).toEqual([
+      ["getTransactionsForAddress", "signatures", { gte: 0, lt: 111_491_819 }],
+      ["getTransactionsForAddress", "full", { gte: 111_491_819, lt: S + 10 }],
+    ]);
+    calls.length = 0;
+    const old = await batches(source, { fromBlock: 0, toBlock: 111_491_819, addresses: [W] });
+    expect(old.map((b) => [b.fromBlock, b.nextBlock, b.transactions.length])).toEqual([[0, 111_491_819, 0]]);
+    expect(asked()).toEqual([["getTransactionsForAddress", "signatures", { gte: 0, lt: 111_491_819 }]]);
   });
 
   it("orders transactions of one slot by the block when a page has no index", async () => {
@@ -246,7 +267,7 @@ describe("helius()", () => {
     const invalid = rejecting(() => new Response(json({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Invalid params" } })));
     await expect(batches(helius({ url: URL_WITH_KEY, fetch: invalid }), query)).rejects.toThrow("helius(mainnet.helius-rpc.com) getTransactionsForAddress: -32602 Invalid params");
     const unauthorized = rejecting(() => new Response("Unauthorized", { status: 401 }));
-    await expect(batches(helius({ url: URL_WITH_KEY, fetch: unauthorized }), query)).rejects.toThrow(/HTTP 401 Unauthorized/);
+    await expect(batches(helius({ url: URL_WITH_KEY, fetch: unauthorized }), query)).rejects.toThrow(new Error("mainnet.helius-rpc.com: HTTP 401 Unauthorized"));
   });
 
   it("refuses program queries", async () => {

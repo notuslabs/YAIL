@@ -1,6 +1,6 @@
 import type { FetchOptions, SolanaQuery, SolanaSource } from "../types.js";
 import { mapLimit } from "../../util.js";
-import { jsonRpc, orderInSlots, tokenOwners, toBatch, type RawTransaction } from "./json-rpc.js";
+import { accountKeys, jsonRpc, orderInSlots, toBatch, type RawTransaction } from "./json-rpc.js";
 import { finishBatch } from "./shared.js";
 
 export interface SolanaRpcOptions {
@@ -50,7 +50,8 @@ export function solanaRpc(options: SolanaRpcOptions): SolanaSource {
 
   async function getTransaction(signature: string, signal?: AbortSignal): Promise<RawTransaction> {
     const raw = await call<RawTransaction>("getTransaction", [signature, { encoding: "json", maxSupportedTransactionVersion: 1, commitment: "confirmed" }], signal);
-    tokenAccountsIn.set(signature, tokenOwners(raw));
+    const keys = accountKeys(raw);
+    tokenAccountsIn.set(signature, [...(raw.meta.preTokenBalances ?? []), ...(raw.meta.postTokenBalances ?? [])].filter((t) => t.owner).map((t) => [keys[t.accountIndex]!, t.owner!]));
     return raw;
   }
 

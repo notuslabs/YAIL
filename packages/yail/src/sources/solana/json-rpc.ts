@@ -57,12 +57,6 @@ export function accountKeys(raw: RawTransaction): string[] {
   return [...raw.transaction.message.accountKeys, ...(loaded?.writable ?? []), ...(loaded?.readonly ?? [])];
 }
 
-/** The token accounts of a transaction whose balances name their owner, as (account, owner). */
-export function tokenOwners(raw: RawTransaction): Array<[string, string]> {
-  const keys = accountKeys(raw);
-  return [...(raw.meta.preTokenBalances ?? []), ...(raw.meta.postTokenBalances ?? [])].filter((t) => t.owner).map((t) => [keys[t.accountIndex]!, t.owner!]);
-}
-
 /** Fill `transactionIndex` where the provider left it out: one `getBlock` (signatures only) per such slot. */
 export async function orderInSlots(raws: RawTransaction[], call: JsonRpcCall, concurrency: number, signal?: AbortSignal): Promise<void> {
   const slots = [...new Set(raws.filter((r) => r.transactionIndex === undefined).map((r) => r.slot))];
