@@ -18,7 +18,7 @@ import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
 import { buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
-import { chunkList, toArray } from "../util.js";
+import { append, chunkList, toArray } from "../util.js";
 import type { BackfillAddressPayload } from "./jobs.js";
 import { decode, type Codec } from "../solana/codec.js";
 import { EMIT_CPI_TAG, programData } from "../solana/program.js";
@@ -611,7 +611,7 @@ export class ChainRunner {
         }
       }
     }
-    events.push(...this.solanaProgramEvents(batch, blockOf));
+    append(events, this.solanaProgramEvents(batch, blockOf));
     return this.dispatch(events, context, meta, writer);
   }
 

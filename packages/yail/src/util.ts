@@ -4,6 +4,11 @@ export function toArray<T>(value: T | readonly T[]): T[] {
   return [value as T];
 }
 
+/** `target.push(...items)` without spreading: a spread passes every item as an argument and overflows the stack past ~100k. */
+export function append<T>(target: T[], items: readonly T[]): void {
+  for (const item of items) target.push(item);
+}
+
 /** Split a list into consecutive slices of at most `size` items. */
 export function chunkList<T>(list: T[], size: number): T[][] {
   if (list.length === 0) return [];

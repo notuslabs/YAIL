@@ -12,6 +12,7 @@ import { hashQuery } from "../src/sources/cached.js";
 import { matchEvmBatch, wholeBlocksQuery } from "../src/sources/match.js";
 import type { EvmBatch, EvmQuery } from "../src/sources/types.js";
 import { FixtureBuilder, addr } from "./helpers.js";
+import { append } from "../src/util.js";
 import type { Db } from "../src/db/client.js";
 import { CacheRunner } from "../src/cache/cached.js";
 import { memory } from "../src/cache/stores.js";
@@ -113,6 +114,16 @@ describe("schema", () => {
     const back = deserializeRow(ledger, { chain: "base", wallet: "0xabc", tx_hash: "0x1", log_index: "3", amount: "-5", block_time: "2026-01-02T03:04:05Z", note: null, tags: ["a"] });
     expect(back).toEqual({ chain: "base", wallet: "0xabc", txHash: "0x1", logIndex: 3, amount: -5n, blockTime: now, note: null, tags: ["a"] });
     expect(() => serializeRow(ledger, { chain: "base" } as any)).toThrow(/missing required column "wallet"/);
+  });
+});
+
+describe("append", () => {
+  it("appends more items than a spread call can pass as arguments", () => {
+    const items = Array.from({ length: 300_000 }, (_, i) => i);
+    expect(() => [].push(...(items as never[]))).toThrow(RangeError);
+    const target = [-1];
+    append(target, items);
+    expect([target.length, target.at(-1)]).toEqual([300_001, 299_999]);
   });
 });
 
