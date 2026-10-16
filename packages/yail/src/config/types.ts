@@ -26,9 +26,10 @@ export interface ChainConfig<S extends Source = Source> {
   /** Max blocks per planned query. Default: 100000 (HyperSync), 2000 (RPC), 50000 (Bitcoin), 5000000 slots (Solana). */
   maxBlockRange?: number;
   /**
-   * EVM, meant for HyperSync: live ranges starting within this many blocks of the head are fetched whole (every
-   * transaction, log and trace) and filtered in-process, instead of sending every address of every set as a filter.
-   * A poll then costs the same with 50 or 50,000 addresses; further behind, the filtered query is cheaper. Off by default.
+   * Live ranges starting within this many blocks of the head are read whole and filtered in-process, instead of asking
+   * the source for every address: a poll then costs the same with 50 or 50,000 addresses; further behind, the filtered
+   * query is cheaper. EVM (meant for HyperSync): every transaction, log and trace. Bitcoin (`esplora()`): every
+   * transaction of each block, 25 per request, instead of one address history per address. Off by default.
    */
   wholeBlocksWithin?: number;
 }

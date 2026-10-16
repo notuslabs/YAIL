@@ -12,7 +12,7 @@ import { anchorDiscriminator, anchorEvent, b, decode, instruction, programData, 
 import { createIndexer } from "../src/indexer/indexer.js";
 import type { HandlerContext } from "../src/indexer/context.js";
 import type { SolanaInstructionEvent } from "../src/indexer/events.js";
-import type { SolanaLog } from "../src/sources/types.js";
+import type { BitcoinSource, SolanaLog } from "../src/sources/types.js";
 import { t, table } from "../src/schema/index.js";
 import { sql } from "../src/db/sql.js";
 import type { Db } from "../src/db/client.js";
@@ -158,15 +158,13 @@ describe("Bitcoin wallets via Esplora", () => {
   const fixture = readFixture<BitcoinFixture>(`${fixtures}bitcoin-wallets.json`);
   const expected = fixture.expected as { addresses: string[]; stats: Record<string, { txCount: number; balance: bigint; funded: bigint; spent: bigint }>; tip: number };
   const btcLedger = table("btc_ledger", { wallet: t.string(), txid: t.hash(), received: t.uint64(), sent: t.uint64(), fee: t.uint64(), block: t.uint64(), blockTime: t.dateTime() }, { orderBy: ["wallet", "txid"], scopes: { wallet: "wallet" } });
-  let db: Db | undefined;
-  afterAll(async () => {
-    await db?.close();
-  });
-
-  it("reproduces funded/spent totals per address", async () => {
+  it.each([{ wholeBlocksWithin: undefined }, { wholeBlocksWithin: 10_000_000 }])("reproduces funded/spent totals per address (wholeBlocksWithin $wholeBlocksWithin)", async ({ wholeBlocksWithin }) => {
+    const source = fixtureSource(fixture);
+    const asked: boolean[] = [];
+    const recording: BitcoinSource = { ...source, fetch: (query, options) => (asked.push(query.wholeBlocks === true), source.fetch(query, options)) };
     const config = createConfig({
       database: ch.database(),
-      chains: { bitcoin: { id: "bitcoin", source: fixtureSource(fixture), finality: 0 } },
+      chains: { bitcoin: { id: "bitcoin", source: recording, finality: 0, wholeBlocksWithin } },
       addressSets: { btc: { initial: expected.addresses } },
       accounts: { BtcWallets: { chain: "bitcoin", address: addressSet("btc"), startBlock: 0 } },
       server: { port: false },
@@ -178,7 +176,6 @@ describe("Bitcoin wallets via Esplora", () => {
       context.db.insert(btcLedger).values({ wallet: event.address, txid: event.tx.txid, received: event.received, sent: event.sent, fee: event.fee, block: BigInt(event.block.height), blockTime: new Date(event.block.time * 1000) });
     });
     await indexer.run();
-    db = indexer.db;
     const rows = await indexer.db.query<{ wallet: string; received: string; sent: string; n: string }>(sql`SELECT wallet, sum(received) AS received, sum(sent) AS sent, count() AS n FROM ${btcLedger} FINAL GROUP BY wallet`);
     expect(rows.length).toBe(expected.addresses.length);
     for (const r of rows) {
@@ -188,6 +185,9 @@ describe("Bitcoin wallets via Esplora", () => {
       expect(BigInt(r.received) - BigInt(r.sent)).toBe(s.balance);
       expect(Number(r.n)).toBe(s.txCount);
     }
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((whole) => whole === (wholeBlocksWithin !== undefined))).toBe(true);
+    await indexer.db.close();
   });
 });
 

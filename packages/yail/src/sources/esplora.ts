@@ -66,6 +66,20 @@ export function esplora(options: EsploraOptions): BitcoinSource {
     return out;
   }
 
+  /** Every transaction of each block in [fromBlock, toBlock) that spends from or pays to one of `addresses`, 25 per request. */
+  async function scanBlocks(addresses: Set<string>, fromBlock: number, toBlock: number, signal?: AbortSignal): Promise<EsploraTx[][]> {
+    const touches = (tx: EsploraTx) => tx.vin.some((v) => addresses.has(v.prevout?.scriptpubkey_address ?? "")) || tx.vout.some((o) => addresses.has(o.scriptpubkey_address ?? ""));
+    const out: EsploraTx[][] = [];
+    for (let height = fromBlock; height < toBlock; height++) {
+      const hash = await getJson<string>(`/block-height/${height}`, signal);
+      const { tx_count } = await getJson<{ tx_count: number }>(`/block/${hash}`, signal);
+      const starts = Array.from({ length: Math.ceil(tx_count / 25) }, (_, page) => page * 25);
+      const pages = await mapLimit(starts, concurrency, (start) => getJson<EsploraTx[]>(`/block/${hash}/txs/${start}`, signal));
+      out.push(pages.flat().filter(touches));
+    }
+    return out;
+  }
+
   return {
     kind: "bitcoin",
     name: `esplora(${new URL(base).host})`,
@@ -75,8 +89,9 @@ export function esplora(options: EsploraOptions): BitcoinSource {
     },
     async *fetch(query: BitcoinQuery, fetchOptions?: FetchOptions) {
       const byId = new Map<string, EsploraTx>();
-      const scans = await mapLimit(query.addresses, concurrency, (a) => scanAddress(a, query.fromBlock, query.toBlock, fetchOptions?.signal));
-      for (const tx of scans.flat()) byId.set(tx.txid, tx);
+      const signal = fetchOptions?.signal;
+      const read = query.wholeBlocks ? () => scanBlocks(new Set(query.addresses), query.fromBlock, query.toBlock, signal) : () => mapLimit(query.addresses, concurrency, (a) => scanAddress(a, query.fromBlock, query.toBlock, signal));
+      for (const tx of (await read()).flat()) byId.set(tx.txid, tx);
       const txs = [...byId.values()]
         .map(toTransaction)
         .sort((a, b) => a.blockHeight - b.blockHeight || a.txid.localeCompare(b.txid));

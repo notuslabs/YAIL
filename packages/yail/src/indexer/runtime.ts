@@ -306,7 +306,7 @@ export class ChainRunner {
     if (source.kind === "evm") {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
-      if (live && this.wholeBlocksWithin !== undefined && this.head - from <= this.wholeBlocksWithin) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), q);
+      if (this.nearHead(live, from)) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), q);
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else if (source.kind === "solana") {
       const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });
@@ -314,7 +314,7 @@ export class ChainRunner {
       empty = q.addresses.length + q.instructions.length + q.logs.length === 0;
     } else {
       const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
-      fetchBatches = () => source.fetch(q, { signal: options.signal });
+      fetchBatches = () => source.fetch({ ...q, wholeBlocks: this.nearHead(live, from) }, { signal: options.signal });
       empty = q.addresses.length === 0;
     }
     if (empty) {
@@ -375,6 +375,11 @@ export class ChainRunner {
       log.warn({ event: "range_incomplete", chain: this.chain, from, to, reached: batchFrom });
     }
     return stats;
+  }
+
+  /** Live ranges starting within `wholeBlocksWithin` of the head are read as whole blocks. */
+  private nearHead(live: boolean, from: number): boolean {
+    return live && this.wholeBlocksWithin !== undefined && this.head - from <= this.wholeBlocksWithin;
   }
 
   private async advance(nextBlock: number): Promise<void> {
