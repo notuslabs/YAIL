@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { reviveBatch, serializeBatch } from "./cached.js";
-import { matchesTxFilters } from "./rpc.js";
+import { matchEvmBatch } from "./match.js";
 import { finishBatch, walletOf } from "./solana/shared.js";
 import type { BitcoinBatch, BitcoinQuery, BitcoinSource, BitcoinTransaction, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaInstructionFilter, SolanaLog, SolanaQuery, SolanaSource, SolanaTransaction, Source } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
@@ -76,21 +76,16 @@ export function fixtureSource(fixture: Fixture, options: { blocksPerBatch?: numb
         while (from < query.toBlock) {
           const to = Math.min(from + per, query.toBlock);
           const inRange = (x: { blockNumber: number }) => x.blockNumber >= from && x.blockNumber < to;
-          const logMatches = (l: EvmLog) => matchesLogFilters(l, query);
-          const traceMatches = (t: EvmTrace) => matchesTxFilters(t.from, t.to, query.traces ?? []);
-          const matched = new Set([...fixture.logs.filter(logMatches), ...(fixture.traces ?? []).filter(traceMatches)].map((x) => x.transactionHash));
-          const txs = fixture.transactions
-            .filter(inRange)
-            .filter((t) => (query.transactions.length > 0 && matchesTxFilters(t.from, t.to, query.transactions)) || ((query.includeLogTransactions || query.join) && matched.has(t.hash)))
-            .sort(txOrder);
-          // With `join`, every log and trace of a returned transaction comes along.
-          const joined = new Set<string>();
-          if (query.join) for (const t of txs) joined.add(t.hash);
-          const logs = fixture.logs.filter((l) => inRange(l) && (logMatches(l) || joined.has(l.transactionHash))).sort(logOrder);
-          const traces = (fixture.traces ?? []).filter((t) => inRange(t) && (traceMatches(t) || joined.has(t.transactionHash)));
-          const wanted = new Set([...logs.map((l) => l.blockNumber), ...txs.map((t) => t.blockNumber)]);
-          const blocks = fixture.blocks.filter((b) => wanted.has(b.number)).sort((a, b) => a.number - b.number);
-          yield { fromBlock: from, nextBlock: to, blocks, transactions: txs, logs, traces, archiveHeight: fixture.height } satisfies EvmBatch;
+          const recorded: EvmBatch = {
+            fromBlock: from,
+            nextBlock: to,
+            blocks: fixture.blocks.filter((b) => b.number >= from && b.number < to).sort((a, b) => a.number - b.number),
+            transactions: fixture.transactions.filter(inRange).sort(txOrder),
+            logs: fixture.logs.filter(inRange).sort(logOrder),
+            traces: (fixture.traces ?? []).filter(inRange),
+            archiveHeight: fixture.height,
+          };
+          yield matchEvmBatch(recorded, query);
           from = to;
         }
       },

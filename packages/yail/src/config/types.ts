@@ -25,6 +25,12 @@ export interface ChainConfig<S extends Source = Source> {
   pollInterval?: number;
   /** Max blocks per planned query. Default: 100000 (HyperSync), 2000 (RPC), 50000 (Bitcoin), 5000000 slots (Solana). */
   maxBlockRange?: number;
+  /**
+   * EVM, meant for HyperSync: live ranges starting within this many blocks of the head are fetched whole (every
+   * transaction, log and trace) and filtered in-process, instead of sending every address of every set as a filter.
+   * A poll then costs the same with 50 or 50,000 addresses; further behind, the filtered query is cheaper. Off by default.
+   */
+  wholeBlocksWithin?: number;
 }
 
 export type BlockRef = number | "latest";
@@ -154,6 +160,11 @@ export interface IndexingConfig {
   jobConcurrency?: number;
   /** Max addresses per source filter chunk. Default 500. */
   addressChunk?: number;
+  /**
+   * Addresses adopted together (same set and block range) are backfilled by one job reading them in one source query,
+   * up to this many per job. A job the source refuses as too large splits in halves. Default 500.
+   */
+  backfillBatch?: number;
 }
 
 export interface Config<

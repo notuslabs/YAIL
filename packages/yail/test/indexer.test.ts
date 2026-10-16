@@ -11,6 +11,7 @@ import type { DatabaseConfig } from "../src/db/client.js";
 import type { EvmBatch, EvmQuery, EvmSource, FetchOptions } from "../src/sources/types.js";
 import { requestListeners } from "../src/util.js";
 import { FixtureBuilder, addr } from "./helpers.js";
+import { AddressRegistry } from "../src/addresses/registry.js";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
 const factoryAbi = parseAbi(["event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)"]);
@@ -63,10 +64,10 @@ afterAll(async () => {
   await ch.stop();
 });
 
-function makeIndexer(database: DatabaseConfig, opts: { fixture: ReturnType<typeof buildFixture>; source?: EvmSource; backfillSource?: EvmSource; cacheSource?: boolean; withFactory?: boolean }) {
+function makeIndexer(database: DatabaseConfig, opts: { fixture: ReturnType<typeof buildFixture>; source?: EvmSource; backfillSource?: EvmSource; cacheSource?: boolean; withFactory?: boolean; wholeBlocksWithin?: number }) {
   const config = createConfig({
     database,
-    chains: { test: { id: 1337, source: opts.source ?? fixtureSource(opts.fixture, { blocksPerBatch: 25 }), backfillSource: opts.backfillSource, finality: 10, pollInterval: 10 } },
+    chains: { test: { id: 1337, source: opts.source ?? fixtureSource(opts.fixture, { blocksPerBatch: 25 }), backfillSource: opts.backfillSource, finality: 10, pollInterval: 10, wholeBlocksWithin: opts.wholeBlocksWithin } },
     addressSets: { wallets: { initial: [W1, W2] } },
     contracts: {
       Token: { abi: erc20, chain: "test", address: TOKEN, startBlock: 0, filter: [{ event: "Transfer", args: { from: addressSet("wallets") } }, { event: "Transfer", args: { to: addressSet("wallets") } }] },
@@ -196,7 +197,7 @@ describe("activity accounts", () => {
   const ROUTER = addr(0x500);
   const activity = table("activity", { wallet: t.address(), txHash: t.hash(), direction: t.string(), logs: t.uint32(), traces: t.uint32() }, { orderBy: ["wallet", "txHash"] });
 
-  it("delivers every transaction that mentions a wallet, whole, once per wallet", async () => {
+  it.each([{ wholeBlocksWithin: undefined }, { wholeBlocksWithin: 1_000 }])("delivers every transaction that mentions a wallet, whole, once per wallet (wholeBlocksWithin $wholeBlocksWithin)", async ({ wholeBlocksWithin }) => {
     const fb = new FixtureBuilder(20);
     const inLog = fb.tx(5, OTHER, ROUTER, 0n);
     fb.transfer(5, TOKEN, OTHER, W1, 10n, inLog); // W1 only appears in a log topic
@@ -208,7 +209,7 @@ describe("activity accounts", () => {
     fb.transfer(8, TOKEN, addr(0x10), addr(0x11), 1n); // touches no wallet
     const config = createConfig({
       database: ch.database(),
-      chains: { test: { id: 1337, source: fixtureSource(fb.build()), finality: 0 } },
+      chains: { test: { id: 1337, source: fixtureSource(fb.build()), finality: 0, wholeBlocksWithin } },
       addressSets: { wallets: { initial: [W1, W2] } },
       accounts: { Wallets: { chain: "test", address: addressSet("wallets"), startBlock: 0, activity: true } },
       server: { port: false },
@@ -366,6 +367,128 @@ describe("source requests", () => {
     expect(history.sent()).toBeGreaterThan(0);
     expect(status.counters.sourceRequests).toBe(live.sent() + history.sent());
     expect(status.chains.test?.sourceRequests).toBe(live.sent() + history.sent());
+    await indexer.db.close();
+  });
+});
+
+describe("whole blocks near the head", () => {
+  const isWhole = (q: EvmQuery) => q.logs.length === 1 && Object.keys(q.logs[0]!).length === 0;
+
+  async function indexed(indexer: ReturnType<typeof makeIndexer>["indexer"]) {
+    return {
+      balances: await balances(indexer),
+      native: await indexer.db.rows(native, sql`ORDER BY wallet, tx_hash, direction`),
+      pools: await indexer.db.rows(poolEvents, sql`ORDER BY pool, tx_hash, log_index`),
+    };
+  }
+
+  it("indexes from whole blocks exactly what the filtered queries index", async () => {
+    const filtered = makeIndexer(ch.database(), { fixture: buildFixture() }).indexer;
+    await filtered.run();
+    const live = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }));
+    const whole = makeIndexer(ch.database(), { fixture: buildFixture(), source: live.source, wholeBlocksWithin: 1_000 }).indexer;
+    await whole.run();
+    expect(live.queries.some(isWhole)).toBe(true);
+    expect(await indexed(whole)).toEqual(await indexed(filtered));
+    await filtered.db.close();
+    await whole.db.close();
+  });
+
+  it("keeps the filtered queries for ranges further from the head", async () => {
+    const live = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }));
+    const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture(), source: live.source, wholeBlocksWithin: 5 });
+    await indexer.run();
+    expect(live.queries.filter(isWhole)).toEqual([]);
+    await indexer.db.close();
+  });
+});
+
+describe("batched backfills", () => {
+  const W4 = addr(0x4);
+
+  function withW4() {
+    const fb = fixtureBuilder(120);
+    fb.transfer(25, TOKEN, OTHER, W4, 11n);
+    return fb.build();
+  }
+
+  async function registerW3W4(backfillSource: EvmSource) {
+    const { indexer } = makeIndexer(await caughtUp(), { fixture: withW4(), backfillSource });
+    await indexer.init();
+    await indexer.addresses.register([
+      { set: "wallets", address: W3 },
+      { set: "wallets", address: W4 },
+    ]);
+    await indexer.run();
+    return indexer;
+  }
+
+  async function expectBackfilled(indexer: Awaited<ReturnType<typeof registerW3W4>>) {
+    const b = await balances(indexer);
+    expect([b[W3], b[W4]]).toEqual([
+      { total: 5n, n: 2 },
+      { total: 11n, n: 1 },
+    ]);
+    expect(indexer.addresses.list({ set: "wallets", status: "live" }).map((r) => r.address).sort()).toEqual([W1, W2, W3, W4]);
+  }
+
+  it("reads wallets registered together in one job and one query", async () => {
+    const history = intercepted(fixtureSource(withW4(), { blocksPerBatch: 200 }));
+    const indexer = await registerW3W4(history.source);
+    expect(history.queries.map((q) => q.transactions)).toEqual([[{ from: [W3, W4] }, { to: [W3, W4] }]]);
+    const jobs = await indexer.db.rows(internalTables.jobs);
+    expect(jobs.map((j) => [j.status, j.payload.addresses])).toEqual([["done", [W3, W4]]]);
+    await expectBackfilled(indexer);
+    await indexer.db.close();
+  });
+
+  it("splits a job in halves when the source refuses its query as too large", async () => {
+    const source = fixtureSource(withW4(), { blocksPerBatch: 200 });
+    const refusing: EvmSource = {
+      ...source,
+      async *fetch(query, options) {
+        if ((query.transactions[0]?.from?.length ?? 0) > 1) throw new Error("Payload is too large and query is using the minimum block range.");
+        yield* source.fetch(query, options);
+      },
+    };
+    const history = intercepted(refusing);
+    const indexer = await registerW3W4(history.source);
+    expect(history.queries.map((q) => q.transactions[0]?.from)).toEqual([[W3, W4], [W3], [W4]]);
+    const jobs = await indexer.db.rows(internalTables.jobs, sql`ORDER BY created_at`);
+    expect(jobs.map((j) => [j.status, j.attempts, j.payload.addresses])).toEqual([
+      ["done", 1, [W3, W4]],
+      ["done", 1, [W3]],
+      ["done", 1, [W4]],
+    ]);
+    await expectBackfilled(indexer);
+    await indexer.db.close();
+  });
+  it("still runs a job enqueued with one address, before backfills were batched", async () => {
+    const { indexer } = makeIndexer(await caughtUp(), { fixture: withW4() });
+    await indexer.init();
+    await indexer.internals.registry.register({ set: "wallets", chain: "test", address: W4, adoptedAtBlock: 111 });
+    const now = new Date();
+    await indexer.db.insert(internalTables.jobs).values({ id: "legacy", chain: "test", kind: "backfill_address", payload: { set: "wallets", address: W4, fromBlock: 0, toBlock: 111 }, status: "pending", attempts: 0, error: "", createdAt: now, updatedAt: now });
+    await indexer.run();
+    expect((await balances(indexer))[W4]).toEqual({ total: 11n, n: 1 });
+    expect(indexer.addresses.list({ set: "wallets" }).find((r) => r.address === W4)?.status).toBe("live");
+    await indexer.db.close();
+  });
+});
+
+describe("address registry", () => {
+  it("picks up what another process registered since its last load", async () => {
+    const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture() });
+    await indexer.init();
+    const reads: boolean[] = [];
+    const db = { ...indexer.db, rows: ((table, where, options) => (reads.push(where !== undefined), indexer.db.rows(table, where, options))) as typeof indexer.db.rows };
+    const other = new AddressRegistry(db, (_chain, address) => address.toLowerCase());
+    await other.load();
+    expect(other.has("wallets", "test", W1)).toBe(true);
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    await other.load();
+    expect(other.has("wallets", "test", W3)).toBe(true);
+    expect(reads).toEqual([false, true]);
     await indexer.db.close();
   });
 });

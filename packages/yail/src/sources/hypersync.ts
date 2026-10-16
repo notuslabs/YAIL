@@ -20,7 +20,14 @@ export interface HypersyncOptions {
   /** Envio API token (https://app.envio.dev/api-tokens). Falls back to ENVIO_API_TOKEN. */
   apiToken?: string;
   maxNumRetries?: number;
+  /** Default 120000: the first request of a query with tens of thousands of addresses uploads it whole. */
   httpReqTimeoutMillis?: number;
+  /**
+   * Send queries in Cap'n Proto and let HyperSync cache them (default true): after the first request, a query is sent
+   * as a hash of its filters plus the block range, so polls with many addresses stay small. JSON queries are refused
+   * above about 2 MB (~5,000 wallets of an `activity` account); cached Cap'n Proto ones took 48,816.
+   */
+  queryCaching?: boolean;
   /** Parallel requests used by the streaming path for large ranges. Default 8. */
   concurrency?: number;
   /** Use the parallel stream API when a range spans at least this many blocks. Default 5000. */
@@ -56,7 +63,15 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
     }
     let client = clients.get(url);
     if (!client) {
-      client = new HypersyncClient({ url, apiToken, maxNumRetries: options.maxNumRetries ?? 12, httpReqTimeoutMillis: options.httpReqTimeoutMillis ?? 30_000 });
+      const caching = options.queryCaching ?? true;
+      client = new HypersyncClient({
+        url,
+        apiToken,
+        maxNumRetries: options.maxNumRetries ?? 12,
+        httpReqTimeoutMillis: options.httpReqTimeoutMillis ?? 120_000,
+        serializationFormat: caching ? "CapnProto" : "Json",
+        enableQueryCaching: caching,
+      });
       clients.set(url, client);
     }
     return client;
@@ -148,16 +163,27 @@ async function* mergeByBlock(main: AsyncGenerator<EvmBatch>, other: AsyncGenerat
       return taken;
     };
     const blocks = new Map([...batch.blocks, ...split(held.blocks, (b) => b.number)].map((b) => [b.number, b]));
+    // Both queries return what they share (a swap log of a wallet's transaction, that transaction): keep it once.
     yield {
       ...batch,
       blocks: [...blocks.values()].sort((a, b) => a.number - b.number),
-      transactions: [...batch.transactions, ...split(held.transactions, (t) => t.blockNumber)].sort(txOrder),
-      logs: [...batch.logs, ...split(held.logs, (l) => l.blockNumber)].sort(logOrder),
-      traces: [...(batch.traces ?? []), ...split(held.traces!, (t) => t.blockNumber)],
+      transactions: uniqueBy([...batch.transactions, ...split(held.transactions, (t) => t.blockNumber)], (t) => t.hash).sort(txOrder),
+      logs: uniqueBy([...batch.logs, ...split(held.logs, (l) => l.blockNumber)], (l) => `${l.blockNumber}:${l.logIndex}`).sort(logOrder),
+      traces: uniqueBy([...(batch.traces ?? []), ...split(held.traces!, (t) => t.blockNumber)], (t) => `${t.transactionHash}:${t.traceAddress.join(",")}`),
       archiveHeight: Math.min(batch.archiveHeight ?? Infinity, held.archiveHeight ?? Infinity),
     };
   }
   await other.return(undefined);
+}
+
+function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const k = key(item);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 async function* getRange(client: HypersyncClient, hsQuery: Query, query: EvmQuery, count: () => void, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {

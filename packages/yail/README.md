@@ -76,7 +76,7 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 
 | source | use |
 |---|---|
-| `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). |
+| `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). Queries go out in Cap'n Proto and HyperSync caches them (`queryCaching: false` turns it off): after its first request, a query travels as a hash of its filters plus the block range. |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
 | `hypersync({ kind: "solana", apiToken? })` | Solana through Solana HyperSync: wallets (their SOL and the token accounts they own) and [programs](#solana-programs). Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
@@ -285,6 +285,20 @@ cache: { store: redis({ url: process.env.REDIS_URL }) },
 
 In tests, `seedCache(store, chain, key, output)` from `@notuslabs/yail/testing` fixes an answer so its function never runs.
 
+### Many addresses near the head
+
+A filtered HyperSync query carries every address it matches: an `activity` account sends 7 filters per wallet, about
+385 bytes as JSON. JSON queries are refused above about 2 MB (~5,000 wallets); cached Cap'n Proto ones took 48,816,
+but HyperSync still takes 5–7 s to match them on a few blocks, and every new address uploads the query again.
+`wholeBlocksWithin` fetches live ranges that start within that many blocks of the head whole (every transaction, log
+and trace, no filters) and applies the query in-process, with HyperSync's rules: the handlers get the same batches.
+Measured on 2026-10-16, a 30 s poll at the head is one request per chain whatever the number of addresses: 0.3–2.2 s,
+0.1 MB (Avalanche) to 25 MB (Base, with traces) decoded. Further behind, the filtered query is cheaper.
+
+```ts
+base: { id: 8453, source: hypersync({ url, traces: { url: tracesUrl } }), pollInterval: 30_000, wholeBlocksWithin: 100 },
+```
+
 ### Dynamic addresses and backfill
 
 `addressSet("wallets")` can be used as a contract's `address`, in an event `filter`, or as an account's `address`. Members live in `_yail_addresses` and can be added at any time:
@@ -298,6 +312,8 @@ curl -X POST :42069/addresses -d '{"set":"wallets","address":["0xabc…"]}'
 ```
 
 What happens: the live loop adopts the address at its current block `N` and includes it from then on; a job backfills `[fromBlock, N)` with a query restricted to that address; the address flips to `live`. No gaps, no double processing. Progress is visible on `/status` and `/jobs`. Handlers see `context.backfill === true` during the backfill.
+
+Addresses adopted together (same set, same `fromBlock`) share a job, up to `indexing.backfillBatch` (default 500), read in one query: on HyperSync a scan costs its block range more than its addresses, so 500 wallets over Optimism's whole history took 53 s and 186 requests, where one job per wallet takes about 3 requests and 1–11 s each. A job the source refuses as too large splits in halves, each resuming where it stopped.
 
 A job that throws (a source or ClickHouse outage, a handler error) is retried up to 8 times: 30 s after the first failure, then twice as long after each one, about an hour in all. The wait lives in memory, so after a restart a pending job runs at once. Address backfills and range re-indexes keep a checkpoint: a retry starts after the last batch they wrote, and the checkpoint is saved to `_yail_jobs` at most once a minute, so a restarted indexer resumes near it too (a range re-index then deletes and rewrites from the checkpoint on). When an address backfill fails for good, the address becomes `failed` and stays live: `failed` only means its history is incomplete. Registering it again re-runs that history, `[fromBlock, N)` where `N` is the block it was first adopted at. Find failed addresses with `SELECT * FROM _yail_addresses FINAL WHERE status = 'failed'`.
 
