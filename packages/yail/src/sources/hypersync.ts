@@ -1,7 +1,7 @@
 import { HypersyncClient, JoinMode, type LogField, type LogFilter, type Query, type QueryResponse, type StreamConfig, type TraceField, type TransactionField, type Log as HsLog, type Transaction as HsTx, type Block as HsBlock, type Trace as HsTrace } from "@envio-dev/hypersync-client";
 import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, FetchOptions, SolanaSource } from "./types.js";
 import { logOrder, lower, txOrder } from "./types.js";
-import { lowerOrNull, requestListeners } from "../util.js";
+import { append, lowerOrNull, requestListeners } from "../util.js";
 import { solanaHypersync, type SolanaHypersyncOptions } from "./solana/hypersync.js";
 
 export type { SolanaHypersyncOptions };
@@ -150,16 +150,17 @@ async function* mergeByBlock(main: AsyncGenerator<EvmBatch>, other: AsyncGenerat
       const next = await other.next();
       if (next.done) break;
       covered = next.value.nextBlock;
-      held.blocks.push(...next.value.blocks);
-      held.transactions.push(...next.value.transactions);
-      held.logs.push(...next.value.logs);
-      held.traces!.push(...(next.value.traces ?? []));
+      append(held.blocks, next.value.blocks);
+      append(held.transactions, next.value.transactions);
+      append(held.logs, next.value.logs);
+      append(held.traces!, next.value.traces ?? []);
       held.archiveHeight = next.value.archiveHeight;
     }
     const inBatch = (block: number) => block < batch.nextBlock;
     const split = <T>(items: T[], block: (item: T) => number): T[] => {
       const [taken, kept] = [items.filter((item) => inBatch(block(item))), items.filter((item) => !inBatch(block(item)))];
-      items.splice(0, items.length, ...kept);
+      items.length = 0;
+      append(items, kept);
       return taken;
     };
     const blocks = new Map([...batch.blocks, ...split(held.blocks, (b) => b.number)].map((b) => [b.number, b]));
