@@ -414,6 +414,27 @@ describe("onRequest", () => {
     expect(listener).toHaveBeenCalledTimes(4);
   });
 
+  it("reads whole blocks through esplora() when asked, keeping the transactions of the addresses", async () => {
+    const tx = (txid: string, from: string, to: string) => ({ txid, fee: 1, vin: [{ txid: "p", vout: 0, is_coinbase: false, prevout: { scriptpubkey_address: from, value: 10 } }], vout: [{ scriptpubkey_address: to, value: 9 }], status: { confirmed: true, block_height: 5, block_hash: "h5", block_time: 1 } });
+    const block = Array.from({ length: 30 }, (_, i) => tx(`t${i}`, "x", "y"));
+    block[3] = tx("spends", "a", "y");
+    block[27] = tx("pays", "x", "b");
+    const paths: string[] = [];
+    const fake: typeof fetch = async (input) => {
+      const path = new URL(String(input)).pathname.replace("/api", "");
+      paths.push(path);
+      if (path === "/block-height/5") return new Response("h5");
+      if (path === "/block/h5") return new Response(JSON.stringify({ tx_count: 30 }));
+      const start = Number(path.split("/").at(-1));
+      return new Response(JSON.stringify(block.slice(start, start + 25)));
+    };
+    const source = esplora({ url: "https://mempool.space/api", fetch: fake });
+    const txids: string[] = [];
+    for await (const batch of source.fetch({ fromBlock: 5, toBlock: 6, addresses: ["a", "b"], wholeBlocks: true })) txids.push(...batch.transactions.map((t) => t.txid));
+    expect(txids.sort()).toEqual(["pays", "spends"]);
+    expect(paths).toEqual(["/block-height/5", "/block/h5", "/block/h5/txs/0", "/block/h5/txs/25"]);
+  });
+
   it("counts helius() calls and those of the rpc() it reads below slot 111,491,819", async () => {
     const methods: string[] = [];
     const fake: typeof fetch = async (_input, init) => {

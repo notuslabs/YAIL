@@ -157,6 +157,12 @@ export interface EvmSource extends SourceBase {
 
 export interface BitcoinQuery extends RangeQuery {
   addresses: string[];
+  /**
+   * Read the range's blocks whole and keep the transactions of `addresses`: the same answer, at a cost that grows with
+   * the blocks instead of the addresses. Set by the live loop within the chain's `wholeBlocksWithin` of the head;
+   * a source that cannot read whole blocks ignores it.
+   */
+  wholeBlocks?: boolean;
 }
 
 export interface BitcoinOutput {

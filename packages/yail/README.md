@@ -299,6 +299,11 @@ Measured on 2026-10-16, a 30 s poll at the head is one request per chain whateve
 base: { id: 8453, source: hypersync({ url, traces: { url: tracesUrl } }), pollInterval: 30_000, wholeBlocksWithin: 100 },
 ```
 
+On Bitcoin, `esplora()` scans one address history per address, so a block costs as many requests as there are
+addresses. With `wholeBlocksWithin`, live ranges near the head read each block's transactions instead, 25 per request
+(~150 requests a block on mempool.space): on block 971,773, 14 s for the same transactions that 208 address scans
+took 255 s to find. Address backfills still scan address by address.
+
 ### Dynamic addresses and backfill
 
 `addressSet("wallets")` can be used as a contract's `address`, in an event `filter`, or as an account's `address`. Members live in `_yail_addresses` and can be added at any time:
