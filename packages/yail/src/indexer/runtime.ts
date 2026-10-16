@@ -10,6 +10,7 @@ import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
 import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
+import { matchEvmBatches, wholeBlocksQuery } from "../sources/match.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
@@ -17,7 +18,8 @@ import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
 import { buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
-import { toArray } from "../util.js";
+import { chunkList, toArray } from "../util.js";
+import type { BackfillAddressPayload } from "./jobs.js";
 import { decode, type Codec } from "../solana/codec.js";
 import { EMIT_CPI_TAG, programData } from "../solana/program.js";
 import { compareAddress } from "../sources/solana/shared.js";
@@ -33,7 +35,7 @@ export interface RuntimeDeps {
   handlers: Map<string, Handler[]>;
   contracts: ContextDeps["contracts"];
   /** Called by the live loop when newly adopted addresses need history. */
-  enqueueBackfill: (chain: string, job: { set: string; address: string; fromBlock: number; toBlock: number }) => Promise<void>;
+  enqueueBackfill: (chain: string, job: BackfillAddressPayload) => Promise<void>;
   /** Called on a detected reorg to re-index a window. */
   enqueueReindex: (chain: string, fromBlock: number, toBlock: number) => Promise<void>;
   onError?: "stop" | "skip";
@@ -96,6 +98,7 @@ export class ChainRunner {
   readonly finality: number;
   readonly pollInterval: number;
   readonly maxBlockRange: number;
+  readonly wholeBlocksWithin: number | undefined;
   private wakeResolve: (() => void) | undefined;
   private lastRefresh = 0;
 
@@ -108,6 +111,7 @@ export class ChainRunner {
     this.finality = cfg.finality ?? defaults.finality;
     this.pollInterval = cfg.pollInterval ?? defaults.pollInterval;
     this.maxBlockRange = cfg.maxBlockRange ?? defaults.maxBlockRange;
+    this.wholeBlocksWithin = cfg.wholeBlocksWithin;
     if (plan.kind === "evm" && cfg.rpc) {
       this.client = createCachedClient({
         chain: plan.chain,
@@ -271,8 +275,15 @@ export class ChainRunner {
     const liveNow = adopted.filter((r) => r.fromBlock >= r.adoptedAtBlock);
     await this.deps.registry.updateMany(needBackfill, { adopted: true, status: "pending" });
     await this.deps.registry.updateMany(liveNow, { adopted: true, status: "live" });
+    const backfills = new Map<string, BackfillAddressPayload>();
     for (const r of needBackfill) {
-      await this.deps.enqueueBackfill(this.chain, { set: r.set, address: r.address, fromBlock: Number(r.fromBlock), toBlock: Number(r.adoptedAtBlock) });
+      const key = `${r.set}:${r.fromBlock}:${r.adoptedAtBlock}`;
+      const job = backfills.get(key) ?? { set: r.set, addresses: [], fromBlock: Number(r.fromBlock), toBlock: Number(r.adoptedAtBlock) };
+      job.addresses.push(r.address);
+      backfills.set(key, job);
+    }
+    for (const job of backfills.values()) {
+      for (const addresses of chunkList(job.addresses, this.deps.config.indexing?.backfillBatch ?? 500)) await this.deps.enqueueBackfill(this.chain, { ...job, addresses });
     }
     this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: this.cursor, live: liveNow.length, backfill: needBackfill.length });
   }
@@ -295,6 +306,7 @@ export class ChainRunner {
     if (source.kind === "evm") {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
+      if (live && this.wholeBlocksWithin !== undefined && this.head - from <= this.wholeBlocksWithin) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), q);
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else if (source.kind === "solana") {
       const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });

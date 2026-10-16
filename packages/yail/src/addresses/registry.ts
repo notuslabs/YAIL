@@ -29,6 +29,7 @@ function key(set: string, chain: string, address: string): string {
  */
 export class AddressRegistry {
   private rows = new Map<string, AddressRow>();
+  private loadedAt: number | undefined;
   private listeners = new Set<(row: AddressRow) => void>();
 
   constructor(private readonly db: Db, private readonly normalize: (chain: string, address: string) => string) {}
@@ -39,13 +40,26 @@ export class AddressRegistry {
    * a write made by another chain loop never reverts that write.
    */
   async load(): Promise<void> {
-    const rows = await this.db.rows(addressesTable);
+    const startedAt = Date.now();
+    const rows = await this.changedSinceLastLoad();
+    this.loadedAt = startedAt;
     for (const r of rows) {
       const k = key(r.set, r.chain, r.address);
       const existing = this.rows.get(k);
       if (existing && existing.updatedAt.getTime() > r.updatedAt.getTime()) continue;
       this.rows.set(k, r);
     }
+  }
+
+  /**
+   * Every row on the first load, then the rows written since the previous one (with a minute of overlap for a writer
+   * whose insert lands late): with tens of thousands of addresses per chain, re-reading the whole table every 10 s per
+   * chain is most of what the indexer does.
+   */
+  private async changedSinceLastLoad(): Promise<AddressRow[]> {
+    if (this.loadedAt === undefined) return this.db.rows(addressesTable);
+    const since = new Date(this.loadedAt - 60_000);
+    return this.db.rows(addressesTable, sql`WHERE ${sql.identifier(addressesTable.columnName("updatedAt"))} >= ${since}`, { final: false });
   }
 
   onChange(fn: (row: AddressRow) => void): () => void {

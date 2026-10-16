@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AddressRegistry } from "../addresses/registry.js";
+import type { AddressRegistry, AddressRow } from "../addresses/registry.js";
 import type { Db } from "../db/client.js";
 import { jobs as jobsTable } from "../db/internal.js";
 import { sql } from "../db/sql.js";
@@ -15,10 +15,13 @@ export type JobKind = JobRow["kind"];
 
 export interface BackfillAddressPayload {
   set: string;
-  address: string;
+  /** Read in one source query (split in halves if the source refuses it as too large). */
+  addresses: string[];
   fromBlock: number;
   toBlock: number;
 }
+/** Jobs enqueued before backfills were batched carry one `address`. */
+type StoredBackfillPayload = BackfillAddressPayload | (Omit<BackfillAddressPayload, "addresses"> & { addresses?: undefined; address: string });
 export interface ReindexRangePayload {
   fromBlock: number;
   toBlock: number;
@@ -137,12 +140,13 @@ export class JobRunner {
 
   private async execute(job: JobRow): Promise<void> {
     const { obs } = this.deps;
-    const wide = obs.wide({ chain: this.chain, job: job.kind, jobId: job.id, ...job.payload });
+    const { addresses, ...payload } = job.payload;
+    const wide = obs.wide({ chain: this.chain, job: job.kind, jobId: job.id, ...payload, ...(Array.isArray(addresses) && { addresses: addresses.length }) });
     job.attempts += 1;
     job.status = "running";
     await this.save(job);
     try {
-      if (job.kind === "backfill_address") await this.backfillAddress(job.payload as unknown as BackfillAddressPayload, this.checkpoint(job));
+      if (job.kind === "backfill_address") await this.backfillAddresses(backfillPayload(job), this.checkpoint(job));
       else if (job.kind === "reindex_range") await this.reindexRange(job.payload as unknown as ReindexRangePayload, this.checkpoint(job));
       else if (job.kind === "reindex_scope") await this.reindexScope(job.payload as unknown as ReindexScopePayload);
       job.status = "done";
@@ -164,8 +168,7 @@ export class JobRunner {
         wide.set({ retryInMs });
         this.retryLater(job, retryInMs);
       } else if (job.kind === "backfill_address") {
-        const p = job.payload as unknown as BackfillAddressPayload;
-        await this.deps.registry.update(p.set, this.chain, p.address, { status: "failed", error: job.error });
+        await this.deps.registry.updateMany(this.registered(backfillPayload(job)), { status: "failed", error: job.error });
       }
     } finally {
       wide.emit();
@@ -202,10 +205,28 @@ export class JobRunner {
     this.delayed.set(job.id, timer);
   }
 
-  private async backfillAddress(p: BackfillAddressPayload, onProgress?: (nextBlock: number) => Promise<void>): Promise<void> {
-    await this.deps.registry.update(p.set, this.chain, p.address, { status: "backfilling" });
-    await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: [p.address] }, label: "backfill", source: this.runner.plan.config.backfillSource, onProgress });
-    await this.deps.registry.update(p.set, this.chain, p.address, { status: "live", error: "" });
+  private async backfillAddresses(p: BackfillAddressPayload, onProgress?: (nextBlock: number) => Promise<void>): Promise<void> {
+    await this.deps.registry.updateMany(this.registered(p), { status: "backfilling" });
+    let reached = p.fromBlock;
+    const progress = async (nextBlock: number) => {
+      reached = nextBlock;
+      await onProgress?.(nextBlock);
+    };
+    try {
+      await this.runner.processRange(p.fromBlock, p.toBlock, { backfill: true, override: { set: p.set, addresses: p.addresses }, label: "backfill", source: this.runner.plan.config.backfillSource, onProgress: progress });
+    } catch (err) {
+      if (p.addresses.length === 1 || !/payload (is )?too large/i.test((err as Error).message)) throw err;
+      const half = Math.ceil(p.addresses.length / 2);
+      this.deps.obs.log.warn({ event: "backfill_split", chain: this.chain, addresses: p.addresses.length, fromBlock: reached });
+      await this.enqueue("backfill_address", { ...p, addresses: p.addresses.slice(0, half), fromBlock: reached });
+      await this.enqueue("backfill_address", { ...p, addresses: p.addresses.slice(half), fromBlock: reached });
+      return;
+    }
+    await this.deps.registry.updateMany(this.registered(p), { status: "live", error: "" });
+  }
+
+  private registered(p: BackfillAddressPayload): AddressRow[] {
+    return p.addresses.flatMap((address) => this.deps.registry.get(p.set, this.chain, address) ?? []);
   }
 
   private async reindexRange(p: ReindexRangePayload, onProgress: (nextBlock: number) => Promise<void>): Promise<void> {
@@ -232,7 +253,13 @@ export class JobRunner {
     // Re-run history for every set the value belongs to on this chain.
     const memberships = this.deps.registry.setsContaining(this.chain, value).filter((r) => !r.set.startsWith("__factory:"));
     for (const m of memberships) {
-      await this.backfillAddress({ set: m.set, address: m.address, fromBlock: Number(m.fromBlock), toBlock: this.runner.cursor });
+      await this.backfillAddresses({ set: m.set, addresses: [m.address], fromBlock: Number(m.fromBlock), toBlock: this.runner.cursor });
     }
   }
+}
+
+function backfillPayload(job: JobRow): BackfillAddressPayload {
+  const p = job.payload as unknown as StoredBackfillPayload;
+  if (p.addresses !== undefined) return p;
+  return { set: p.set, addresses: [p.address], fromBlock: p.fromBlock, toBlock: p.toBlock };
 }

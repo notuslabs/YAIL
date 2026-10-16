@@ -9,6 +9,9 @@ import { AddressRegistry } from "../src/addresses/registry.js";
 import { compileFilter, logMatchesFilter, padAddress } from "../src/indexer/events.js";
 import { fixtureSource, matchesLogFilters } from "../src/sources/fixture.js";
 import { hashQuery } from "../src/sources/cached.js";
+import { matchEvmBatch, wholeBlocksQuery } from "../src/sources/match.js";
+import type { EvmBatch, EvmQuery } from "../src/sources/types.js";
+import { FixtureBuilder, addr } from "./helpers.js";
 import type { Db } from "../src/db/client.js";
 import { CacheRunner } from "../src/cache/cached.js";
 import { memory } from "../src/cache/stores.js";
@@ -215,6 +218,62 @@ describe("plan", () => {
     const c = hashQuery({ fromBlock: 5, toBlock: 9, logs: [{ address: ["0xcd"] }], transactions: [] } as any);
     expect(a).toBe(b);
     expect(a).not.toBe(c);
+  });
+});
+
+describe("whole blocks", () => {
+  const TOKEN = addr(0x100);
+  const DEX = addr(0x700);
+  const W = addr(0x1);
+  const OTHER = addr(0x9);
+  const query: EvmQuery = {
+    fromBlock: 0,
+    toBlock: 11,
+    logs: [{ address: [DEX], topics: [[TRANSFER]] }, { topics: [null, null, [padAddress(W)]], join: true }],
+    transactions: [{ from: [W] }, { to: [W] }],
+    traces: [{ from: [W] }, { to: [W] }],
+    join: true,
+  };
+
+  function blocks() {
+    const fb = new FixtureBuilder(10);
+    const toWallet = fb.tx(2, OTHER, DEX, 0n);
+    const received = fb.transfer(2, TOKEN, OTHER, W, 5n, toWallet);
+    const swapOfWallet = fb.transfer(2, DEX, OTHER, OTHER, 1n, toWallet);
+    const swap = fb.transfer(3, DEX, OTHER, OTHER, 2n);
+    fb.transfer(4, TOKEN, OTHER, OTHER, 3n);
+    const internal = fb.tx(5, OTHER, DEX, 0n);
+    const calls = [fb.trace(internal, OTHER, DEX, 0n, []), fb.trace(internal, DEX, W, 7n, [0])];
+    const fx = fb.build();
+    const batch: EvmBatch = { fromBlock: 0, nextBlock: 11, blocks: fx.blocks, transactions: fx.transactions, logs: fx.logs, traces: fx.traces };
+    return { batch, toWallet, received, swapOfWallet, swap, internal, calls };
+  }
+
+  it("asks for every log, transaction and trace of the range, without filters", () => {
+    expect(wholeBlocksQuery(query)).toEqual({ fromBlock: 0, toBlock: 11, logs: [{}], transactions: [{}], traces: [{}] });
+    expect(wholeBlocksQuery({ fromBlock: 0, toBlock: 11, logs: [{ address: [DEX] }], transactions: [] })).toEqual({ fromBlock: 0, toBlock: 11, logs: [{}], transactions: [], traces: [] });
+  });
+
+  it("selects what the filtered query returns: joined transactions whole, plain logs alone, each item once", () => {
+    const { batch, toWallet, received, swapOfWallet, swap, internal, calls } = blocks();
+    const matched = matchEvmBatch(batch, query);
+    expect(matched.transactions.map((t) => t.hash)).toEqual([toWallet.hash, internal.hash]);
+    expect(matched.logs).toEqual([received, swapOfWallet, swap]);
+    expect(matched.traces).toEqual(calls);
+    expect(matched.blocks.map((b) => b.number)).toEqual([2, 3, 5]);
+  });
+
+  it("adds the transactions of plain logs with includeLogTransactions", () => {
+    const { batch, swap } = blocks();
+    const matched = matchEvmBatch(batch, { ...query, includeLogTransactions: true });
+    expect(matched.transactions.map((t) => t.hash)).toContain(swap.transactionHash);
+  });
+
+  it("matches logs on any filter without join", () => {
+    const { batch, received, swapOfWallet, swap } = blocks();
+    const matched = matchEvmBatch(batch, { ...query, transactions: [], traces: [], join: false });
+    expect(matched.logs).toEqual([received, swapOfWallet, swap]);
+    expect(matched.transactions).toEqual([]);
   });
 });
 
