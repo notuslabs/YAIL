@@ -7,6 +7,7 @@ import type { InferRow, Table } from "../schema/table.js";
 import { INDEX_META_COLUMNS } from "../schema/table.js";
 import type { Observability } from "../observability/logger.js";
 import type { ChainRunner } from "./runtime.js";
+import { chunkList } from "../util.js";
 
 const MAX_JOB_ATTEMPTS = 8;
 
@@ -67,17 +68,25 @@ export class JobRunner {
     return row;
   }
 
-  /** Load unfinished jobs from the database (own chain only). */
+  /**
+   * Load unfinished jobs from the database (own chain only). Finds them by id and status alone, then reads whole rows
+   * only for the jobs this runner does not hold: a batched backfill's payload carries its addresses and is written
+   * again at every checkpoint, so reading every payload on every poll is most of the database's work.
+   */
   async poll(): Promise<number> {
     const finishedBefore = [...this.finished];
-    const rows = await this.deps.db.rows(jobsTable, sql`WHERE chain = ${this.chain} AND status IN ('pending', 'running') ORDER BY created_at`);
+    const unfinished = await this.deps.db.query<{ id: string }>(sql`SELECT id FROM ${jobsTable} FINAL WHERE chain = ${this.chain} AND status IN ('pending', 'running') ORDER BY created_at`);
     for (const id of finishedBefore) this.finished.delete(id);
-    const known = new Set([...this.queue.map((j) => j.id), ...this.finished]);
+    const known = new Set([...this.queue.map((j) => j.id), ...this.finished, ...this.runningIds, ...this.delayed.keys()]);
+    const fresh = unfinished.map((r) => r.id).filter((id) => !known.has(id));
     let added = 0;
-    for (const r of rows) {
-      if (known.has(r.id) || this.runningIds.has(r.id) || this.delayed.has(r.id)) continue;
-      this.queue.push(r);
-      added++;
+    for (const ids of chunkList(fresh, 1_000)) {
+      const rows = await this.deps.db.rows(jobsTable, sql`WHERE has(${ids}, id) AND status IN ('pending', 'running') ORDER BY created_at`);
+      for (const r of rows) {
+        if (this.runningIds.has(r.id) || this.delayed.has(r.id) || this.finished.has(r.id)) continue;
+        this.queue.push(r);
+        added++;
+      }
     }
     if (added > 0) this.wake?.();
     return added;
