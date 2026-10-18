@@ -80,6 +80,11 @@ describe("clickhouse", () => {
     expect(Number(raw[0]!.n)).toBe(2);
   });
 
+  it("throws when a query fails after its first rows were sent, instead of returning them", async () => {
+    const failing = sql`SELECT number, throwIf(number = 50000) AS failed FROM numbers(100000)`;
+    await expect(db.query(failing, { settings: { max_block_size: "1000" } })).rejects.toThrow();
+  });
+
   it("feeds materialized views", async () => {
     const rows = await db.query<{ wallet: string; amount: string }>(sql`SELECT wallet, sum(amount) AS amount FROM ${totals} GROUP BY wallet`);
     // MV saw both inserts of row 1 (10 and 11) plus -3: 18. This is why aggregates should be keyed by immutable rows.

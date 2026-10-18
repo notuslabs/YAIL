@@ -51,6 +51,10 @@ const DEFAULT_SETTINGS = {
   date_time_output_format: "iso",
   output_format_json_quote_64bit_integers: 1,
   input_format_import_nested_json: 0,
+  // A query that fails after its first rows were sent (memory limit, timeout) still answers HTTP 200. By default
+  // ClickHouse then appends the error as one more JSON row, which the client returns as data: the caller gets the
+  // rows read so far as if they were all. Written as plain text instead, the error makes the client throw.
+  http_write_exception_in_output_format: 0,
 } as const;
 
 export function createDb(config: DatabaseConfig): Db {
