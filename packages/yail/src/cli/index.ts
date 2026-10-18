@@ -137,6 +137,8 @@ export async function run(argv: string[]): Promise<void> {
         fixture = await recordEvmFixture(source, buildEvmQuery(plan, from, to, registry), { name: values.chain, chainId: Number(plan.config.id) });
       } else if (source.kind === "solana") {
         fixture = await recordSolanaFixture(source, buildSolanaQuery(plan, from, to, registry), { name: values.chain });
+      } else if (source.kind === "stellar") {
+        fail("record: no fixtures for Stellar sources yet");
       } else {
         fixture = await recordBitcoinFixture(source, buildAddressQuery(plan, from, to, registry), { name: values.chain });
       }

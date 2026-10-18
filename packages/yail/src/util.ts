@@ -94,12 +94,21 @@ export function counted(doFetch: typeof fetch, count: () => void): typeof fetch 
  * An HTTP response body, retried with backoff on 429, 5xx and network errors. Other statuses throw at once. Errors
  * name the host only: providers put API keys in the path (Alchemy) or the query (Helius).
  */
-export async function request(doFetch: typeof fetch, url: string, init: RequestInit = {}): Promise<string> {
+export function request(doFetch: typeof fetch, url: string, init: RequestInit = {}): Promise<string> {
+  return retried(doFetch, url, init, (res) => res.text());
+}
+
+/** `request()` for a binary body. */
+export function requestBytes(doFetch: typeof fetch, url: string, init: RequestInit = {}): Promise<Buffer> {
+  return retried(doFetch, url, init, async (res) => Buffer.from(await res.arrayBuffer()));
+}
+
+async function retried<T>(doFetch: typeof fetch, url: string, init: RequestInit, read: (res: Response) => Promise<T>): Promise<T> {
   const { host } = new URL(url);
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await doFetch(url, init);
-      if (res.ok) return await res.text();
+      if (res.ok) return await read(res);
       const body = await res.text().catch(() => "");
       if (res.status !== 429 && res.status < 500) throw new HttpError(`${host}: HTTP ${res.status} ${body.slice(0, 300)}`);
       if (attempt === 12) throw new Error(`${host}: HTTP ${res.status} after ${attempt} attempts`);

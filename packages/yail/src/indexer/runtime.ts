@@ -8,7 +8,7 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
+import type { BitcoinBatch, StellarBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
 import { matchEvmBatches, wholeBlocksQuery } from "../sources/match.js";
 import { isAddressSet, isFactory } from "../config/address.js";
@@ -16,7 +16,7 @@ import type { Config } from "../config/types.js";
 import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
 import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
-import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
+import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, stellarAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type StellarAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
 import { buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
 import { append, chunkList, toArray } from "../util.js";
 import type { BackfillAddressPayload } from "./jobs.js";
@@ -46,6 +46,7 @@ type DispatchPayload =
   | { kind: "evmAccount"; payload: EvmAccountEvent }
   | { kind: "bitcoinAccount"; payload: BitcoinAccountEvent }
   | { kind: "solanaAccount"; payload: SolanaAccountEvent }
+  | { kind: "stellarAccount"; payload: StellarAccountEvent }
   | { kind: "solanaInstruction"; payload: SolanaInstructionEvent }
   | { kind: "solanaProgram"; payload: SolanaProgramEvent };
 
@@ -282,8 +283,10 @@ export class ChainRunner {
       job.addresses.push(r.address);
       backfills.set(key, job);
     }
+    // A Stellar job reads every ledger of its range whatever its addresses: one job per range.
+    const batchSize = this.plan.kind === "stellar" ? Infinity : (this.deps.config.indexing?.backfillBatch ?? 500);
     for (const job of backfills.values()) {
-      for (const addresses of chunkList(job.addresses, this.deps.config.indexing?.backfillBatch ?? 500)) await this.deps.enqueueBackfill(this.chain, { ...job, addresses });
+      for (const addresses of chunkList(job.addresses, batchSize)) await this.deps.enqueueBackfill(this.chain, { ...job, addresses });
     }
     this.deps.obs.log.info({ event: "addresses_adopted", chain: this.chain, atBlock: this.cursor, live: liveNow.length, backfill: needBackfill.length });
   }
@@ -301,7 +304,7 @@ export class ChainRunner {
     const flushMaxRows = this.deps.config.indexing?.flushMaxRows ?? 50_000;
     const live = !options.backfill;
 
-    let fetchBatches: () => AsyncIterable<EvmBatch | BitcoinBatch | SolanaBatch>;
+    let fetchBatches: () => AsyncIterable<EvmBatch | BitcoinBatch | SolanaBatch | StellarBatch>;
     let empty: boolean;
     if (source.kind === "evm") {
       const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
@@ -312,6 +315,10 @@ export class ChainRunner {
       const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
       empty = q.addresses.length + q.instructions.length + q.logs.length === 0;
+    } else if (source.kind === "stellar") {
+      const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
+      fetchBatches = () => source.fetch(q, { signal: options.signal });
+      empty = q.addresses.length === 0;
     } else {
       const q = buildAddressQuery(this.plan, from, to, this.deps.registry, { override: options.override });
       fetchBatches = () => source.fetch({ ...q, wholeBlocks: this.nearHead(live, from) }, { signal: options.signal });
@@ -346,6 +353,8 @@ export class ChainRunner {
             if (live) await this.rememberHashes(evmBatch);
           } else if (this.plan.kind === "solana") {
             eventCount = await this.dispatchSolana(batch as SolanaBatch, context, meta, writer, options.override);
+          } else if (this.plan.kind === "stellar") {
+            eventCount = await this.dispatchStellar(batch as StellarBatch, context, meta, writer, options.override);
           } else {
             eventCount = await this.dispatchBitcoin(batch as BitcoinBatch, context, meta, writer, options.override);
           }
@@ -585,6 +594,31 @@ export class ChainRunner {
     return this.dispatch(events, context, meta, writer);
   }
 
+  // ------------------------------------------------------------ Stellar
+
+  private async dispatchStellar(batch: StellarBatch, context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter, override?: QueryBuildOptions["override"]): Promise<number> {
+    const ledgers = new Map(batch.ledgers.map((l) => [l.sequence, l]));
+    const eventsOf = groupBy(batch.events, (e) => e.transactionHash);
+    const events: DispatchEvent[] = [];
+    for (const a of this.plan.accounts) {
+      const name = `${a.name}:transaction`;
+      if (!this.deps.handlers.has(name)) continue;
+      const members = resolveAddresses(a.address, this.chain, this.deps.registry, override).addresses;
+      for (const tx of batch.transactions) {
+        if (tx.ledger < a.startBlock || (a.endBlock !== undefined && tx.ledger > a.endBlock)) continue;
+        const ledger = ledgers.get(tx.ledger);
+        if (!ledger) throw createError({ message: `ledger ${tx.ledger} missing from ${this.plan.config.source.name} response`, why: "The source returned a transaction without its ledger", fix: "Check the source's batch contents" });
+        const txEvents = eventsOf.get(tx.hash) ?? [];
+        let idx = 0;
+        for (const address of members) {
+          const payload = stellarAccountEvent(tx, ledger, txEvents, address);
+          if (payload) events.push({ block: tx.ledger, txIndex: tx.transactionIndex, logIndex: idx++, name, kind: "stellarAccount", payload });
+        }
+      }
+    }
+    return this.dispatch(events, context, meta, writer);
+  }
+
   // ------------------------------------------------------------ Solana
 
   private async dispatchSolana(batch: SolanaBatch, context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter, override?: QueryBuildOptions["override"]): Promise<number> {
@@ -740,6 +774,8 @@ export class ChainRunner {
 
 function chainDefaults(plan: ChainPlan): { finality: number; pollInterval: number; maxBlockRange: number } {
   if (plan.kind === "bitcoin") return { finality: 3, pollInterval: 30_000, maxBlockRange: 50_000 };
+  // A closed Stellar ledger is final (SCP has no forks); one closes every ~5 s.
+  if (plan.kind === "stellar") return { finality: 0, pollInterval: 5_000, maxBlockRange: 100_000 };
   // ~32 slots (13 s) is Solana's finalized depth. Long ranges: Solana HyperSync fetches them in parallel windows.
   if (plan.kind === "solana") return { finality: 32, pollInterval: 2_000, maxBlockRange: 5_000_000 };
   if (plan.config.source.name.startsWith("rpc")) return { finality: 20, pollInterval: 2_000, maxBlockRange: 2_000 };
@@ -756,6 +792,8 @@ function describeEvent(e: DispatchEvent): Record<string, unknown> {
       return { block: e.block, txid: e.payload.tx.txid, address: e.payload.address };
     case "solanaAccount":
       return { block: e.block, tx: e.payload.transaction.signature, address: e.payload.address };
+    case "stellarAccount":
+      return { block: e.block, tx: e.payload.transaction.hash, address: e.payload.address };
     case "solanaInstruction":
     case "solanaProgram":
       return { block: e.block, tx: e.payload.transaction.signature, program: e.payload.program, address: e.payload.address };

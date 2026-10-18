@@ -10,6 +10,8 @@ export { cached, hashQuery } from "./cached.js";
 export type { CachedSourceOptions } from "./cached.js";
 export { esplora } from "./esplora.js";
 export type { EsploraOptions } from "./esplora.js";
+export { galexie } from "./galexie.js";
+export type { GalexieOptions } from "./galexie.js";
 export { union } from "./union.js";
 export { fixtureSource, recordEvmFixture, recordBitcoinFixture, recordSolanaFixture, writeFixture, readFixture, matchesLogFilters } from "./fixture.js";
 export type { Fixture, EvmFixture, BitcoinFixture, SolanaFixture } from "./fixture.js";
