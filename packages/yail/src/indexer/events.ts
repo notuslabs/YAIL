@@ -1,6 +1,6 @@
 import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type ContractEventName, type DecodeEventLogReturnType } from "viem";
 import type { Config, EventFilter, ProgramConfig } from "../config/types.js";
-import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction } from "../sources/types.js";
+import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, StellarEvent, StellarLedger, StellarTransaction } from "../sources/types.js";
 import type { EventDef, InstructionDef } from "../solana/program.js";
 import { isAddressSet } from "../config/address.js";
 import { walletOf } from "../sources/solana/shared.js";
@@ -81,6 +81,20 @@ export interface SolanaAccountEvent {
   tokens: Array<{ account: string; mint: string; decimals: number; delta: bigint }>;
 }
 
+export interface StellarAccountEvent {
+  /** The matched account. */
+  address: string;
+  transaction: StellarTransaction;
+  ledger: StellarLedger;
+  /** Every event of the transaction, in order. */
+  events: StellarEvent[];
+  /**
+   * The account's balance changes from the transaction's transfer, mint, burn, clawback and fee events, one per asset:
+   * `native` (XLM, in stroops), `CODE:ISSUER` for a classic asset, the token contract (C…) for any other token.
+   */
+  deltas: Array<{ asset: string; amount: bigint }>;
+}
+
 export interface SolanaInstructionEvent<args = unknown, account extends string = string> {
   /** The instruction's key in the program config. */
   name: string;
@@ -141,7 +155,7 @@ type ChainKind<C extends Config<any, any, any>, name extends string> = name exte
     ? NonNullable<C["chains"][string]>["source"]["kind"]
     : "evm";
 
-type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; solana: SolanaAccountEvent };
+type AccountEventByKind = { evm: EvmAccountEvent; bitcoin: BitcoinAccountEvent; solana: SolanaAccountEvent; stellar: StellarAccountEvent };
 
 export type AccountEventOf<C extends Config<any, any, any>, K extends keyof AccountsOf<C>> = AccountEventByKind[ChainKind<C, RefNames<AccountsOf<C>[K]["chain"]>> & keyof AccountEventByKind];
 
@@ -276,6 +290,39 @@ export function bitcoinAccountEvent(tx: BitcoinTransaction, address: string): Bi
   }
   if (received === 0n && sent === 0n) return null;
   return { address, tx, block: { height: tx.blockHeight, hash: tx.blockHash, time: tx.blockTime }, received, sent, net: received - sent, fee: tx.fee, isSender };
+}
+
+/** The account's view of a transaction, or null when none of its events names the account. */
+export function stellarAccountEvent(transaction: StellarTransaction, ledger: StellarLedger, events: StellarEvent[], address: string): StellarAccountEvent | null {
+  if (!events.some((e) => e.contract === address || e.topics.includes(address))) return null;
+  const byAsset = new Map<string, bigint>();
+  for (const move of events.flatMap(movements)) {
+    if (move.address === address) byAsset.set(move.asset, (byAsset.get(move.asset) ?? 0n) + move.amount);
+  }
+  const deltas = [...byAsset].filter(([, amount]) => amount !== 0n).map(([asset, amount]) => ({ asset, amount }));
+  return { address, transaction, ledger, events, deltas };
+}
+
+/**
+ * What a CAP-67 or SEP-41 token event moves. Topics are the event name, its parties, then (Stellar Asset Contracts)
+ * the asset as `native` or `CODE:ISSUER`; older contracts put an admin before the party of a mint or a clawback, so
+ * those take the last party. A fee event charges XLM (negative data: a refund).
+ */
+function movements(event: StellarEvent): Array<{ address: string; asset: string; amount: bigint }> {
+  const [name, ...rest] = event.topics;
+  const amount = typeof event.data === "bigint" ? event.data : (event.data as { amount?: unknown } | null)?.amount;
+  if (typeof amount !== "bigint") return [];
+  const last = rest.at(-1);
+  const named = typeof last === "string" && (last === "native" || last.includes(":"));
+  const asset = named ? last : event.contract;
+  const parties = (named ? rest.slice(0, -1) : rest).filter((t): t is string => typeof t === "string");
+  const party = parties.at(-1);
+  if (party === undefined) return [];
+  if (name === "transfer" && parties.length >= 2) return [{ address: parties[0]!, asset, amount: -amount }, { address: parties[1]!, asset, amount }];
+  if (name === "mint") return [{ address: party, asset, amount }];
+  if (name === "burn" || name === "clawback") return [{ address: party, asset, amount: -amount }];
+  if (name === "fee") return [{ address: parties[0]!, asset: "native", amount: -amount }];
+  return [];
 }
 
 /** The wallet's slice of a transaction's balances, or null when the transaction has none. */

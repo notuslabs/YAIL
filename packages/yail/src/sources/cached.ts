@@ -139,6 +139,10 @@ const clamp: { [K in SourceKind]: (batch: BatchByKind[K], next: number) => Batch
     };
   },
   bitcoin: (batch, next) => ({ ...batch, nextBlock: next, transactions: batch.transactions.filter((t) => t.blockHeight < next) }),
+  stellar: (batch, next) => {
+    const before = (row: { ledger: number }) => row.ledger < next;
+    return { ...batch, nextBlock: next, ledgers: batch.ledgers.filter((l) => l.sequence < next), transactions: batch.transactions.filter(before), events: batch.events.filter(before) };
+  },
 };
 
 function clampBatch<K extends SourceKind>(kind: K, batch: BatchByKind[K], next: number): BatchByKind[K] {

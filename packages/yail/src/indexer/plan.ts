@@ -280,7 +280,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   return { fromBlock: from, toBlock: to, logs, transactions, traces, includeLogTransactions, join };
 }
 
-/** Bitcoin queries, and the wallets of Solana ones: the addresses of every account source active in the range. */
+/** Bitcoin and Stellar queries, and the wallets of Solana ones: the addresses of every account source active in the range. */
 export function buildAddressQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery & SolanaQuery {
   const addresses = new Set<string>();
   for (const a of plan.accounts) {

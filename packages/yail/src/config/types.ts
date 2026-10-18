@@ -10,7 +10,7 @@ export type AddressSpec = string | readonly string[] | AddressSetRef | FactoryRe
 export interface ChainConfig<S extends Source = Source> {
   /** Chain id (EVM) or a string id such as "bitcoin" or "solana". */
   id: number | string;
-  /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `helius()` (Solana), `esplora()`, a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
+  /** Data source: `hypersync()`, `rpc()` (EVM, or Solana with `kind: "solana"`), `helius()` (Solana), `esplora()` (Bitcoin), `galexie()` (Stellar), a `union()` of one chain's sources, or any of them wrapped in `cached()`. */
   source: S;
   /**
    * Source for address history: `backfill_address` and `reindex_scope` jobs read through it, the live loop and
@@ -19,7 +19,7 @@ export interface ChainConfig<S extends Source = Source> {
   backfillSource?: S;
   /** Optional JSON-RPC URL, enables `context.client.readContract` (EVM only). */
   rpc?: string;
-  /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin), 32 slots (Solana). */
+  /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin), 32 slots (Solana), 0 (Stellar). */
   finality?: number;
   /** Poll interval in ms once caught up. Default: 2000 (EVM), 30000 (Bitcoin). */
   pollInterval?: number;

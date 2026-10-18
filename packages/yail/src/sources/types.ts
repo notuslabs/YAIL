@@ -315,13 +315,70 @@ export interface SolanaSource extends SourceBase {
   fetch(query: SolanaQuery, options?: FetchOptions): AsyncIterable<SolanaBatch>;
 }
 
-export type Source = EvmSource | BitcoinSource | SolanaSource;
+// ---------------------------------------------------------------- Stellar
+// Blocks are ledgers.
+
+export interface StellarQuery extends RangeQuery {
+  /** Accounts (G…), contracts (C…) or liquidity pools (L…). A transaction matches when one of its events names one in its topics or was emitted by one. */
+  addresses: string[];
+}
+
+export interface StellarLedger {
+  sequence: number;
+  /** Unix seconds. */
+  closeTime: number;
+  hash: string;
+}
+
+export interface StellarTransaction {
+  hash: string;
+  ledger: number;
+  /** Order the transaction was applied in its ledger. */
+  transactionIndex: number;
+  /** The account the fee was charged to: the fee bump's sponsor, a channel account, or the transaction's source. */
+  feeSource: string;
+  /** Stroops, refunds deducted. Charged even when the transaction failed. */
+  feeCharged: bigint;
+  success: boolean;
+}
+
+/** One CAP-67 event: a contract's own event, or one the network emits for classic operations and fees. */
+export interface StellarEvent {
+  transactionHash: string;
+  ledger: number;
+  transactionIndex: number;
+  /** The operation that emitted it. Null for the transaction's own events (the fee charged, then refunded). */
+  operationIndex: number | null;
+  /** Order of the event in its transaction. */
+  eventIndex: number;
+  /** The emitting contract: a token's, or the Stellar Asset Contract of a classic asset (XLM's for fees). */
+  contract: string;
+  /** Decoded: addresses as strkeys (G…, C…, M…, L…), symbols and strings as strings, integers as bigints. */
+  topics: unknown[];
+  data: unknown;
+}
+
+export interface StellarBatch extends RangeBatch {
+  /** The ledgers of the matched transactions. */
+  ledgers: StellarLedger[];
+  transactions: StellarTransaction[];
+  /** Every event of the matched transactions, by transaction then in order. */
+  events: StellarEvent[];
+}
+
+export interface StellarSource extends SourceBase {
+  readonly kind: "stellar";
+  fetch(query: StellarQuery, options?: FetchOptions): AsyncIterable<StellarBatch>;
+}
+
+export type Source = EvmSource | BitcoinSource | SolanaSource | StellarSource;
 export type SourceKind = Source["kind"];
-export type QueryOf<S extends Source> = S extends EvmSource ? EvmQuery : S extends BitcoinSource ? BitcoinQuery : SolanaQuery;
+export type QueryOf<S extends Source> = S extends EvmSource ? EvmQuery : S extends BitcoinSource ? BitcoinQuery : S extends StellarSource ? StellarQuery : SolanaQuery;
 export interface BatchByKind {
   evm: EvmBatch;
   bitcoin: BitcoinBatch;
   solana: SolanaBatch;
+  stellar: StellarBatch;
 }
 export type BatchOf<S extends Source> = BatchByKind[S["kind"]];
 
