@@ -1,5 +1,5 @@
 import * as zlib from "node:zlib";
-import { StrKey, scValToNative, xdr } from "@stellar/stellar-base";
+import { StrKey, scValToNative, xdr } from "@stellar/stellar-sdk/base";
 import type { FetchOptions, StellarBatch, StellarEvent, StellarQuery, StellarSource } from "./types.js";
 import { append, counted, request, requestBytes, requestListeners } from "../util.js";
 

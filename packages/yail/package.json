@@ -1,6 +1,6 @@
 {
   "name": "@notuslabs/yail",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Blockchain indexer with Ponder-style DX: HyperSync as the primary EVM and Solana source, Esplora for Bitcoin, ClickHouse as the only storage",
   "keywords": [
     "indexer",
@@ -82,7 +82,7 @@
     "@opentelemetry/sdk-metrics": "^2.11.0",
     "@opentelemetry/sdk-node": "^0.222.0",
     "@opentelemetry/semantic-conventions": "^1.37.0",
-    "@stellar/stellar-base": "^15.0.0",
+    "@stellar/stellar-sdk": "^16.3.1",
     "evlog": "^2.29.0",
     "hono": "^4.13.10",
     "tsx": "^4.23.15",

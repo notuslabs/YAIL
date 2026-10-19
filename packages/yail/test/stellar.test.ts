@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, expectTypeOf, it } from "vitest";
-import { Keypair } from "@stellar/stellar-base";
+import { Keypair } from "@stellar/stellar-sdk/base";
 import { addressSet, createConfig } from "../src/config/index.js";
 import { internalTables } from "../src/db/index.js";
 import { createIndexer } from "../src/indexer/indexer.js";
@@ -18,10 +18,12 @@ const HASH = "d111a57cdc0a2c99f7be8ff7dcb0577e594e62b159ab091f157e8caa2a7630af";
 const AQUA = "AQUA:GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA";
 const XTAR = "XTAR:GAORYJ3KBDGIM7FFSKVUJHJ5NEFWIRDIAGGBJBJS7TY6ECZS53257IG4";
 const file = readFileSync(new URL("./fixtures/stellar-ledger-65012084.xdr.zst", import.meta.url));
+// Ledger 63,717,881 (2026-07-30): a smart wallet signs with address v2 credentials, which @stellar/stellar-base 15 could not read.
+const v2File = readFileSync(new URL("./fixtures/stellar-ledger-63717881.xdr.zst", import.meta.url));
 const lake = "https://aws-public-blockchain.s3.us-east-2.amazonaws.com/v1.1/stellar/ledgers/pubnet";
 
 /** Serves the fixture for every ledger file: a ledger outside the range asked for is skipped by its sequence. */
-function fakeLake(paths: string[] = [], head = LEDGER): typeof fetch {
+function fakeLake(paths: string[] = [], head = LEDGER, ledgerFile = file): typeof fetch {
   return async (input) => {
     const url = new URL(String(input));
     paths.push(url.pathname + url.search);
@@ -29,7 +31,7 @@ function fakeLake(paths: string[] = [], head = LEDGER): typeof fetch {
     if (url.searchParams.get("delimiter")) return new Response("<ListBucketResult><Contents><Key>v1.1/stellar/ledgers/pubnet/.config.json</Key></Contents><CommonPrefixes><Prefix>v1.1/stellar/ledgers/pubnet/FC20C9FF--64960000-65023999/</Prefix></CommonPrefixes></ListBucketResult>");
     const key = `${(0xffffffff - head).toString(16).toUpperCase()}--${head}.xdr.zst`;
     if (url.searchParams.get("list-type")) return new Response(`<ListBucketResult><Contents><Key>v1.1/stellar/ledgers/pubnet/FC20C9FF--64960000-65023999/${key}</Key></Contents></ListBucketResult>`);
-    if (url.pathname.includes("/FC20C9FF--64960000-65023999/")) return new Response(file);
+    if (url.pathname.endsWith(".xdr.zst")) return new Response(ledgerFile);
     return new Response("missing", { status: 404 });
   };
 }
@@ -58,6 +60,15 @@ describe("galexie()", () => {
       { asset: AQUA, amount: -8_918_416n },
       { asset: XTAR, amount: -555_860_401n },
     ]);
+  });
+
+  it("reads transactions signed with address v2 credentials", async () => {
+    const wallet = "CDZMQ6W6JNRPLHBRL3WZPDJPUCMWIJANSOI6WY7ISAOMVOHYRQSMRBLV";
+    const batches = [];
+    for await (const batch of galexie({ fetch: fakeLake([], LEDGER, v2File) }).fetch({ fromBlock: 63_717_881, toBlock: 63_717_882, addresses: [wallet] })) batches.push(batch);
+    const [batch] = batches;
+    expect(batch!.transactions.map((tx) => tx.hash)).toEqual(["fb6756a261bedd6a9ccebbc28d3f2b3797331071fa7fde582880ef0b8533dc70"]);
+    expect(stellarAccountEvent(batch!.transactions[0]!, batch!.ledgers[0]!, batch!.events, wallet)?.deltas).toEqual([{ asset: "USDM0:GDM5QWWXCMDTQMZAKMYTCI52LA7FWBHAZMU5NJLMIFHDJISJRP2ZWPKC", amount: -50_000_000n }]);
   });
 
   it("skips a ledger without the raw key of any address, and yields its range empty", async () => {
