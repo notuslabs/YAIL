@@ -14,7 +14,7 @@ import type { HandlerContext } from "./context.js";
 import type { ChainNames, EventNames, EventOf } from "./events.js";
 import { JobRunner, type JobRow } from "./jobs.js";
 import { buildPlans, type ChainPlan } from "./plan.js";
-import { ChainRunner, type Handler } from "./runtime.js";
+import { ChainRunner, type Handler, type Prefetcher } from "./runtime.js";
 import { toArray } from "../util.js";
 import type { ChainStats } from "../observability/metrics.js";
 
@@ -49,6 +49,11 @@ export interface Indexer<C extends Config<any, any, any>> {
   readonly schema: SchemaModule | ReadonlyArray<Table<any> | MaterializedView>;
   /** Register a handler. Names are `Contract:Event`, `Account:transaction`, `Program:instruction`, `Program:Event`, or `setup`. */
   on<name extends EventNames<C>>(name: name, handler: (args: { event: EventOf<C, name>; context: HandlerContext<C, ChainNames<C>> }) => Promise<void> | void): Indexer<C>;
+  /**
+   * Called once per batch with every `name` event in it, before any of its handlers run: lets a handler's per-event
+   * I/O (an RPC call per transaction, say) run in parallel for the whole batch instead of one event at a time.
+   */
+  prefetch<name extends EventNames<C>>(name: name, prefetcher: (args: { events: EventOf<C, name>[]; context: HandlerContext<C, ChainNames<C>> }) => Promise<void> | void): Indexer<C>;
   /** Connect, migrate, and prepare runners without indexing. Idempotent. */
   init(): Promise<void>;
   /** Run migrations only. */
@@ -76,6 +81,7 @@ export interface Indexer<C extends Config<any, any, any>> {
 export function createIndexer<C extends Config<any, any, any>>(options: IndexerOptions<C>): Indexer<C> {
   const config: Config = options.config;
   const handlers = new Map<string, Handler[]>();
+  const prefetchers = new Map<string, Prefetcher[]>();
   const plans = new Map<string, ChainPlan>();
   const runners = new Map<string, ChainRunner>();
   const jobRunners = new Map<string, JobRunner>();
@@ -157,6 +163,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
           obs,
           http,
           handlers,
+          prefetchers,
           contracts,
           onError: options.onError,
           enqueueBackfill: async (chain, job) => {
@@ -200,6 +207,10 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
       const list = handlers.get(name) ?? [];
       list.push(handler as Handler);
       handlers.set(name, list);
+      return indexer;
+    },
+    prefetch(name, prefetcher) {
+      prefetchers.set(name, [...(prefetchers.get(name) ?? []), prefetcher as Prefetcher]);
       return indexer;
     },
     async init() {

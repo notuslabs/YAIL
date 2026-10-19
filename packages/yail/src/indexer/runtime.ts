@@ -25,6 +25,7 @@ import { EMIT_CPI_TAG, programData } from "../solana/program.js";
 import { compareAddress } from "../sources/solana/shared.js";
 
 export type Handler = (args: { event: any; context: HandlerContext<any, any> }) => Promise<void> | void;
+export type Prefetcher = (args: { events: any[]; context: HandlerContext<any, any> }) => Promise<void> | void;
 
 export interface RuntimeDeps {
   config: Config;
@@ -33,6 +34,8 @@ export interface RuntimeDeps {
   obs: Observability;
   http: HttpClient;
   handlers: Map<string, Handler[]>;
+  /** Called once per batch with every event of a name, before its handlers run (`indexer.prefetch`). */
+  prefetchers: Map<string, Prefetcher[]>;
   contracts: ContextDeps["contracts"];
   /** Called by the live loop when newly adopted addresses need history. */
   enqueueBackfill: (chain: string, job: BackfillAddressPayload) => Promise<void>;
@@ -738,6 +741,11 @@ export class ChainRunner {
 
   private async dispatch(events: DispatchEvent[], context: HandlerContext<any, string>, meta: { current: RowMeta }, writer: BatchWriter): Promise<number> {
     events.sort((a, b) => a.block - b.block || a.txIndex - b.txIndex || a.logIndex - b.logIndex);
+    for (const [name, prefetchers] of this.deps.prefetchers) {
+      const named = events.filter((e) => e.name === name).map((e) => e.payload);
+      if (named.length === 0) continue;
+      for (const p of prefetchers) await p({ events: named, context });
+    }
     const { metrics, log } = this.deps.obs;
     let count = 0;
     for (const e of events) {
