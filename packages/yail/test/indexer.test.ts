@@ -233,6 +233,32 @@ describe("activity accounts", () => {
   });
 });
 
+describe("prefetch", () => {
+  it("hands a batch's events to the prefetcher before any of their handlers run", async () => {
+    const fb = new FixtureBuilder(20);
+    const txs = [fb.tx(5, W1, OTHER, 1n), fb.tx(6, OTHER, W2, 2n), fb.tx(7, W1, OTHER, 3n)];
+    const config = createConfig({
+      database: ch.database(),
+      chains: { test: { id: 1337, source: fixtureSource(fb.build(), { blocksPerBatch: 25 }), finality: 0 } },
+      addressSets: { wallets: { initial: [W1, W2] } },
+      accounts: { Wallets: { chain: "test", address: addressSet("wallets"), startBlock: 0 } },
+      server: { port: false },
+      observability: { pretty: false },
+    });
+    const indexer = createIndexer({ config, schema: {} });
+    const calls: string[] = [];
+    indexer.prefetch("Wallets:transaction", async ({ events }) => {
+      calls.push(`prefetch ${events.map(({ transaction }) => transaction.hash).join(",")}`);
+    });
+    indexer.on("Wallets:transaction", async ({ event }) => {
+      calls.push(`handle ${event.transaction.hash}`);
+    });
+    await indexer.run();
+    expect(calls).toEqual([`prefetch ${txs.map(({ hash }) => hash).join(",")}`, ...txs.map(({ hash }) => `handle ${hash}`)]);
+    await indexer.db.close();
+  });
+});
+
 describe("indexer end-to-end (synthetic fixture)", () => {
   let database: ReturnType<TestClickHouse["database"]>;
   let indexer: ReturnType<typeof makeIndexer>["indexer"];
