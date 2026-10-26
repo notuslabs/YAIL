@@ -8,16 +8,16 @@ import type { HttpClient } from "../http/client.js";
 import { createCachedClient, type CachedClient } from "../rpc/cached-client.js";
 import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
-import type { BitcoinBatch, StellarBatch, EvmBatch, EvmBlock, EvmLog, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
+import type { BitcoinBatch, StellarBatch, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
-import { matchEvmBatches, wholeBlocksQuery } from "../sources/match.js";
+import { evmMatcher, matchEvmBatches, wholeBlocksQuery } from "../sources/match.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
 import { CacheRunner } from "../cache/cached.js";
 import { memory } from "../cache/stores.js";
 import { bitcoinAccountEvent, decodeLog, directionOf, involvedAddresses, logMatchesFilter, solanaAccountEvent, stellarAccountEvent, type ContractEvent, type EvmAccountEvent, type BitcoinAccountEvent, type SetupEvent, type SolanaAccountEvent, type StellarAccountEvent, type SolanaInstructionEvent, type SolanaProgramEvent } from "./events.js";
-import { buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
+import { activeIn, buildAddressQuery, buildEvmQuery, buildSolanaQuery, nextBoundary, resolveAddresses, type ChainPlan, type ContractSource, type ProgramSource, type QueryBuildOptions } from "./plan.js";
 import { append, chunkList, toArray } from "../util.js";
 import type { BackfillAddressPayload } from "./jobs.js";
 import { decode, type Codec } from "../solana/codec.js";
@@ -310,9 +310,10 @@ export class ChainRunner {
     let fetchBatches: () => AsyncIterable<EvmBatch | BitcoinBatch | SolanaBatch | StellarBatch>;
     let empty: boolean;
     if (source.kind === "evm") {
-      const q = buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
+      const atHead = this.nearHead(live, from) && !options.override ? this.headQuery(from, to, addressChunk) : undefined;
+      const q = atHead?.query ?? buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
-      if (this.nearHead(live, from)) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), q);
+      if (atHead) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), atHead.match);
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else if (source.kind === "solana") {
       const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });
@@ -392,6 +393,22 @@ export class ChainRunner {
   /** Live ranges starting within `wholeBlocksWithin` of the head are read as whole blocks. */
   private nearHead(live: boolean, from: number): boolean {
     return live && this.wholeBlocksWithin !== undefined && this.head - from <= this.wholeBlocksWithin;
+  }
+
+  private headMatch: { key: string; query: EvmQuery; match: (batch: EvmBatch) => EvmBatch } | undefined;
+
+  /**
+   * Near the head every poll filters whole blocks with the same query: it and its matcher are built again only when
+   * the chain's addresses or the active sources change, so a poll costs what its blocks hold, not what the registry does.
+   */
+  private headQuery(from: number, to: number, addressChunk: number): { query: EvmQuery; match: (batch: EvmBatch) => EvmBatch } {
+    const active = [...this.plan.contracts, ...this.plan.accounts].filter((s) => activeIn(s, from, to)).map((s) => s.name);
+    const key = `${this.deps.registry.version(this.chain)}:${active.join()}`;
+    if (this.headMatch?.key !== key) {
+      const query = buildEvmQuery(this.plan, from, to, this.deps.registry, { addressChunk });
+      this.headMatch = { key, query, match: evmMatcher(query) };
+    }
+    return { query: { ...this.headMatch.query, fromBlock: from, toBlock: to }, match: this.headMatch.match };
   }
 
   private async advance(nextBlock: number): Promise<void> {

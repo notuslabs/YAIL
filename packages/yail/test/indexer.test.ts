@@ -420,6 +420,22 @@ describe("whole blocks near the head", () => {
     await whole.db.close();
   });
 
+  it("matches a wallet registered at the head from the next poll", async () => {
+    const fb = fixtureBuilder(140);
+    fb.transfer(125, TOKEN, OTHER, W3, 1n);
+    const fixture = fb.build();
+    fixture.height = 130;
+    const { indexer } = makeIndexer(await caughtUp(), { fixture, wholeBlocksWithin: 1_000 });
+    await indexer.init();
+    const runner = indexer.internals.runners.get("test")!;
+    await runner.runLoop({ once: true });
+    await indexer.addresses.register({ set: "wallets", address: W3 });
+    fixture.height = 140;
+    await runner.runLoop({ once: true });
+    expect((await indexer.db.rows(ledger, sql`WHERE wallet = ${W3}`)).map((r) => [r.block, r.mode])).toEqual([[125n, "live"]]);
+    await indexer.db.close();
+  });
+
   it("keeps the filtered queries for ranges further from the head", async () => {
     const live = intercepted(fixtureSource(buildFixture(), { blocksPerBatch: 25 }));
     const { indexer } = makeIndexer(ch.database(), { fixture: buildFixture(), source: live.source, wholeBlocksWithin: 5 });
