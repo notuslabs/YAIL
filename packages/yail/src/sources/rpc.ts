@@ -1,13 +1,14 @@
 import { createPublicClient, http, type PublicClient } from "viem";
-import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions, SolanaSource } from "./types.js";
+import type { BitcoinSource, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTransaction, EvmTxFilter, FetchOptions, SolanaSource } from "./types.js";
 import { lower } from "./types.js";
 import { lowerOrNull, mapLimit, requestListeners } from "../util.js";
 import { solanaRpc, type SolanaRpcOptions } from "./solana/rpc.js";
+import { bitcoinRpc, type BitcoinRpcOptions } from "./bitcoin-rpc.js";
 
-export type { SolanaRpcOptions };
+export type { SolanaRpcOptions, BitcoinRpcOptions };
 
 export interface RpcSourceOptions {
-  /** The chain's kind. Default "evm"; `{ kind: "solana" }` takes `SolanaRpcOptions`. */
+  /** The chain's kind. Default "evm"; `{ kind: "solana" }` takes `SolanaRpcOptions`, `{ kind: "bitcoin" }` `BitcoinRpcOptions`. */
   kind?: "evm";
   url: string;
   /** Blocks per eth_getLogs request. Default 2000 (most public RPCs cap at 2k-10k). */
@@ -40,8 +41,11 @@ interface RawLog {
 export function rpc(options: RpcSourceOptions): EvmSource;
 /** Solana wallets over JSON-RPC, address by address: any slot, cost grows with the wallets' transactions. */
 export function rpc(options: SolanaRpcOptions): SolanaSource;
-export function rpc(options: RpcSourceOptions | SolanaRpcOptions): EvmSource | SolanaSource {
+/** Bitcoin blocks over Bitcoin Core JSON-RPC, one `getblock` each: cost grows with the range, not with the wallets. */
+export function rpc(options: BitcoinRpcOptions): BitcoinSource;
+export function rpc(options: RpcSourceOptions | SolanaRpcOptions | BitcoinRpcOptions): EvmSource | SolanaSource | BitcoinSource {
   if (options.kind === "solana") return solanaRpc(options);
+  if (options.kind === "bitcoin") return bitcoinRpc(options);
   return evmRpc(options);
 }
 

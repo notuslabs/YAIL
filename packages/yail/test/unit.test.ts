@@ -197,6 +197,20 @@ describe("plan", () => {
     expect(q.join).toBe(true);
   });
 
+  it("answers live addresses from memory until a row of the chain changes", async () => {
+    const [a, b] = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"];
+    let stored: unknown[] = [];
+    const db = { rows: async () => stored, insert: () => ({ values: async (rows: unknown[]) => void (stored = rows) }) } as unknown as Db;
+    const registry = new AddressRegistry(db, (_c, x) => x.toLowerCase());
+    await registry.register({ set: "wallets", chain: "base", address: a, status: "live", adoptedAtBlock: 1 });
+    const live = registry.live("wallets", "base");
+    await registry.load();
+    await registry.register({ set: "wallets", chain: "polygon", address: b, status: "live", adoptedAtBlock: 1 });
+    expect(registry.live("wallets", "base")).toBe(live);
+    await registry.register({ set: "wallets", chain: "base", address: b, status: "live", adoptedAtBlock: 1 });
+    expect(registry.live("wallets", "base")).toEqual([a, b]);
+  });
+
   it("skips empty address sets instead of matching everything", () => {
     const registry = new AddressRegistry(fakeDb, (_c, a) => a.toLowerCase());
     const plans = buildPlans(config, { handled: new Set(["Erc20:Transfer"]), resolveLatest: () => 100 });

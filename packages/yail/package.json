@@ -1,6 +1,6 @@
 {
   "name": "@notuslabs/yail",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "description": "Blockchain indexer with Ponder-style DX: HyperSync as the primary EVM and Solana source, Esplora for Bitcoin, ClickHouse as the only storage",
   "keywords": [
     "indexer",

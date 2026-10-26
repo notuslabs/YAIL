@@ -435,6 +435,39 @@ describe("onRequest", () => {
     expect(paths).toEqual(["/block-height/5", "/block/h5", "/block/h5/txs/0", "/block/h5/txs/25"]);
   });
 
+  it("reads Bitcoin blocks through rpc({ kind: 'bitcoin' }), one getblock each, keeping the transactions of the addresses", async () => {
+    const out = (address: string, value: number, n = 0) => ({ n, value, scriptPubKey: { address, type: "witness_v0_keyhash" } });
+    const tx = (txid: string, from: string, to: string) => ({ txid, fee: 0.00014625, vin: [{ txid: "p", vout: 1, prevout: out(from, 0.1) }], vout: [out(to, 0.09985375)] });
+    const coinbase = { txid: "cb", vin: [{ coinbase: "03" }], vout: [out("b", 3.125)] };
+    const blocks: Record<string, unknown> = { h5: { hash: "h5", time: 50, tx: [coinbase, tx("spends", "a", "y"), tx("other", "x", "y")] }, h6: { hash: "h6", time: 60, tx: [tx("pays", "x", "b")] } };
+    const calls: string[] = [];
+    const fake: typeof fetch = async (_input, init) => {
+      const { method, params } = JSON.parse(String(init?.body));
+      calls.push(`${method}(${params.join()})`);
+      const result = method === "getblockcount" ? 7 : method === "getblockhash" ? `h${params[0]}` : blocks[params[0]];
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    };
+    const source = rpc({ kind: "bitcoin", url: "https://bitcoin-mainnet.g.alchemy.com/v2/key", fetch: fake });
+    const listener = vi.fn();
+    source.onRequest?.(listener);
+    expect(await source.getHeight()).toBe(7);
+    const batches = [];
+    for await (const batch of source.fetch({ fromBlock: 5, toBlock: 7, addresses: ["a", "b"] })) batches.push(batch);
+    expect(batches.map((b) => [b.fromBlock, b.nextBlock, b.transactions.map((t) => t.txid)])).toEqual([[5, 6, ["cb", "spends"]], [6, 7, ["pays"]]]);
+    expect(batches[0]!.transactions[1]).toEqual({
+      txid: "spends",
+      blockHeight: 5,
+      blockHash: "h5",
+      blockTime: 50,
+      fee: 14_625n,
+      vin: [{ txid: "p", vout: 1, isCoinbase: false, prevout: { address: "a", value: 10_000_000n } }],
+      vout: [{ n: 0, address: "y", value: 9_985_375n, scriptType: "witness_v0_keyhash" }],
+    });
+    expect(batches[0]!.transactions[0]!.vin).toEqual([{ txid: "", vout: 0, isCoinbase: true, prevout: null }]);
+    expect(calls).toEqual(["getblockcount()", "getblockhash(5)", "getblock(h5,3)", "getblockhash(6)", "getblock(h6,3)"]);
+    expect(listener).toHaveBeenCalledTimes(5);
+  });
+
   it("counts helius() calls and those of the rpc() it reads below slot 111,491,819", async () => {
     const methods: string[] = [];
     const fake: typeof fetch = async (_input, init) => {

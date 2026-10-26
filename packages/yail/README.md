@@ -79,6 +79,7 @@ A source is one interface: `getHeight()` + `fetch(query)` yielding ordered batch
 | `hypersync({ url, apiToken, traces? })` | production EVM. Token from `ENVIO_API_TOKEN` if omitted. `traces: { url, fromBlock? }` names the trace-enabled endpoint for the queries that ask for traces, from the first block it holds (`base-traces` starts at 24,000,000: before that, those queries go to `url` without traces). Queries go out in Cap'n Proto and HyperSync caches them (`queryCaching: false` turns it off): after its first request, a query travels as a hash of its filters plus the block range. |
 | `rpc({ url })` | any JSON-RPC node; slower, no token, used to record fixtures |
 | `esplora({ url })` | Bitcoin address history through mempool.space / blockstream / electrs |
+| `rpc({ kind: "bitcoin", url })` | Bitcoin blocks over Bitcoin Core JSON-RPC (Alchemy, QuickNode, a node ≥ 25): one `getblock` with verbosity 3 a block, any number of addresses. No address index: pair it with `esplora()` as `backfillSource` |
 | `galexie({ url? })` | Stellar from a Galexie data lake (default: the AWS public dataset, every ledger from genesis, ~1 s behind the network). Accounts, contracts and liquidity pools, matched through their CAP-67 events; account events carry each asset's `deltas` |
 | `hypersync({ kind: "solana", apiToken? })` | Solana through Solana HyperSync: wallets (their SOL and the token accounts they own) and [programs](#solana-programs). Recent slots only (from ~2026-01 as of 2026-10); long ranges are read in parallel windows |
 | `rpc({ kind: "solana", url })` | Solana wallets over JSON-RPC, address by address (`getSignaturesForAddress` on the wallet and its token accounts, then `getTransaction`). Any slot; cost grows with the wallets' transactions. No programs |
@@ -305,6 +306,14 @@ addresses. With `wholeBlocksWithin`, live ranges near the head read each block's
 (~150 requests a block on mempool.space): on block 971,773, 14 s for the same transactions that 208 address scans
 took 255 s to find. Address backfills still scan address by address.
 
+`rpc({ kind: "bitcoin" })` reads every live range that way, at two calls a block (~14 MB, ~0.3 s from Alchemy), so a
+live loop that fell hundreds of blocks behind catches up without scanning each address. Address backfills need an
+address index, so keep `esplora()` for them:
+
+```ts
+bitcoin: { id: "bitcoin", source: rpc({ kind: "bitcoin", url: nodeUrl }), backfillSource: esplora({ url: "https://mempool.space/api" }) },
+```
+
 ### Dynamic addresses and backfill
 
 `addressSet("wallets")` can be used as a contract's `address`, in an event `filter`, or as an account's `address`. Members live in `_yail_addresses` and can be added at any time:
@@ -394,7 +403,7 @@ yail status              --url http://localhost:42069
 
 ## Limits and notes
 
-- Bitcoin is scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs.
+- Bitcoin address histories (backfills) are scanned per address through Esplora (HyperSync has no Bitcoin, Bitcoin Core has no address index). Fine for wallet sets in the thousands; for more, point `esplora({ url })` at your own electrs. Live ranges read whole blocks (`wholeBlocksWithin`, or `rpc({ kind: "bitcoin" })` at any distance).
 - Stellar has no address index: `galexie()` downloads every ledger of the range (160–250 KB of zstd each) and decodes only those holding one of the addresses' raw keys. From a host near S3 us-east-2 that is ~300 ledgers/s (64 downloads at once) and ~5 ms of CPU a ledger, so every month of history (~520,000 ledgers) is ~30 minutes, the same for 1 address or 5,000. Addresses adopted together share one backfill job (`backfillBatch` does not apply): each job reads the whole range. Needs Node 22.15+ (zstd in `node:zlib`).
 - Solana HyperSync keeps only recent slots, and plain Solana RPC throttles `getTransaction` (the public endpoint to ~0.5/s): use a paid RPC behind `rpc({ kind: "solana" })`, or `helius()`, for older history at any scale. Transfers into a token account do not name its owner, so the Solana `rpc` also walks the wallet's token accounts (open ones from `getTokenAccountsByOwner`, closed ones from the wallet's own transactions).
 - Internal ETH transfers are only visible through traces, which HyperSync serves on a few chains as a paid add-on (see Wallet activity).

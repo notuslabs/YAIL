@@ -175,6 +175,11 @@ export function nextBoundary(plan: ChainPlan, from: number): number | undefined 
   return next;
 }
 
+/** Whether a source indexes any block of [from, to). */
+export function activeIn(source: { startBlock: number; endBlock?: number }, from: number, to: number): boolean {
+  return source.startBlock < to && (source.endBlock === undefined || source.endBlock >= from);
+}
+
 export interface QueryBuildOptions {
   /** Restrict the query to sources referencing this set, substituting its members. Used for address backfills. */
   override?: { set: string; addresses: string[] };
@@ -182,7 +187,7 @@ export interface QueryBuildOptions {
 }
 
 /** Resolve the address list of a spec on a chain (empty = "match everything" for static specs). */
-export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"], factorySet?: string): { any: boolean; addresses: string[]; set?: string } {
+export function resolveAddresses(spec: AddressSpec | undefined, chain: string, registry: AddressRegistry, override?: QueryBuildOptions["override"], factorySet?: string): { any: boolean; addresses: readonly string[]; set?: string } {
   if (spec === undefined) return { any: true, addresses: [] };
   if (typeof spec === "string") return { any: false, addresses: [normalizeHex(spec)] };
   if (Array.isArray(spec)) return { any: false, addresses: (spec as readonly string[]).map(normalizeHex) };
@@ -205,7 +210,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   const override = options.override;
 
   for (const c of plan.contracts) {
-    if (!(c.startBlock < to && (c.endBlock === undefined || c.endBlock >= from))) continue;
+    if (!activeIn(c, from, to)) continue;
     const usesOverride =
       override !== undefined &&
       ((isAddressSet(c.address) && c.address.set === override.set) ||
@@ -261,7 +266,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
   }
 
   for (const a of plan.accounts) {
-    if (!(a.startBlock < to && (a.endBlock === undefined || a.endBlock >= from))) continue;
+    if (!activeIn(a, from, to)) continue;
     const usesOverride = override !== undefined && isAddressSet(a.address) && a.address.set === override.set;
     if (override && !usesOverride) continue;
     const resolved = resolveAddresses(a.address, plan.chain, registry, override);
@@ -284,7 +289,7 @@ export function buildEvmQuery(plan: ChainPlan, from: number, to: number, registr
 export function buildAddressQuery(plan: ChainPlan, from: number, to: number, registry: AddressRegistry, options: QueryBuildOptions = {}): BitcoinQuery & SolanaQuery {
   const addresses = new Set<string>();
   for (const a of plan.accounts) {
-    if (!(a.startBlock < to && (a.endBlock === undefined || a.endBlock >= from))) continue;
+    if (!activeIn(a, from, to)) continue;
     const usesOverride = options.override !== undefined && isAddressSet(a.address) && a.address.set === options.override.set;
     if (options.override && !usesOverride) continue;
     const resolved = resolveAddresses(a.address, plan.chain, registry, options.override);
@@ -302,7 +307,7 @@ export function buildSolanaQuery(plan: ChainPlan, from: number, to: number, regi
   const instructions: SolanaInstructionFilter[] = [];
   const logs: SolanaLogFilter[] = [];
   for (const p of plan.programs) {
-    if (options.override || !(p.startBlock < to && (p.endBlock === undefined || p.endBlock >= from))) continue;
+    if (options.override || !activeIn(p, from, to)) continue;
     if (p.instructions.length > 0) {
       instructions.push({ programs: p.addresses, discriminators: p.instructions.map((i) => i.def.discriminator), logKinds: p.includeLogs ? ["log", "data"] : [], balances: p.includeBalances });
     }

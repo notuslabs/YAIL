@@ -10,7 +10,7 @@ export type { Db, DatabaseConfig, SqlFragment, MigrateOptions } from "./db/index
 
 // Sources
 export { hypersync, rpc, helius, cached, esplora, galexie, union, fixtureSource } from "./sources/index.js";
-export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, SolanaInstruction, SolanaLog, SolanaInstructionFilter, SolanaLogFilter, StellarSource, StellarQuery, StellarBatch, StellarLedger, StellarTransaction, StellarEvent, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, HeliusOptions, EsploraOptions, GalexieOptions, CachedSourceOptions } from "./sources/index.js";
+export type { Source, EvmSource, BitcoinSource, EvmQuery, EvmBatch, EvmLog, EvmBlock, EvmTransaction, EvmTrace, EvmTraceFilter, BitcoinQuery, BitcoinBatch, BitcoinTransaction, SolanaSource, SolanaQuery, SolanaBatch, SolanaBlock, SolanaTransaction, SolanaBalance, SolanaInstruction, SolanaLog, SolanaInstructionFilter, SolanaLogFilter, StellarSource, StellarQuery, StellarBatch, StellarLedger, StellarTransaction, StellarEvent, HypersyncOptions, SolanaHypersyncOptions, RpcSourceOptions, SolanaRpcOptions, BitcoinRpcOptions, HeliusOptions, EsploraOptions, GalexieOptions, CachedSourceOptions } from "./sources/index.js";
 
 // Indexer
 export { createIndexer } from "./indexer/indexer.js";

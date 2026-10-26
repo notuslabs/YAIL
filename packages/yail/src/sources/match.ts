@@ -24,29 +24,38 @@ export function wholeBlocksQuery(query: EvmQuery): EvmQuery {
  * out once, in the batch's order, with the blocks they are in.
  */
 export function matchEvmBatch(batch: EvmBatch, query: EvmQuery): EvmBatch {
+  return evmMatcher(query)(batch);
+}
+
+/**
+ * `matchEvmBatch` with the query's address Sets built once: with tens of thousands of wallets they cost more than
+ * matching a block, so a matcher is reused across batches and polls while the query is the same.
+ */
+export function evmMatcher(query: EvmQuery): (batch: EvmBatch) => EvmBatch {
   const plainLog = logMatcher(query.join ? query.logs.filter((f) => !f.join) : query.logs);
   const joinLog = logMatcher(query.join ? query.logs.filter((f) => f.join) : []);
   const tx = addressMatcher(query.transactions);
   const trace = addressMatcher(query.traces ?? []);
-  const traces = batch.traces ?? [];
-
-  const whole = new Set<string>();
-  if (query.join) {
-    for (const t of batch.transactions) if (tx(t.from, t.to)) whole.add(t.hash);
-    for (const l of batch.logs) if (joinLog(l)) whole.add(l.transactionHash);
-    for (const t of traces) if (trace(t.from, t.to)) whole.add(t.transactionHash);
-  }
-  const logs = batch.logs.filter((l) => whole.has(l.transactionHash) || plainLog(l));
-  const ofLogs = new Set(query.includeLogTransactions ? logs.filter(plainLog).map((l) => l.transactionHash) : []);
-  const transactions = batch.transactions.filter((t) => whole.has(t.hash) || ofLogs.has(t.hash) || tx(t.from, t.to));
-  const matchedTraces = traces.filter((t) => whole.has(t.transactionHash) || trace(t.from, t.to));
-  const used = new Set([...logs, ...transactions, ...matchedTraces].map((x) => x.blockNumber));
-  return { ...batch, blocks: batch.blocks.filter((b) => used.has(b.number)), transactions, logs, traces: matchedTraces };
+  return (batch) => {
+    const traces = batch.traces ?? [];
+    const whole = new Set<string>();
+    if (query.join) {
+      for (const t of batch.transactions) if (tx(t.from, t.to)) whole.add(t.hash);
+      for (const l of batch.logs) if (joinLog(l)) whole.add(l.transactionHash);
+      for (const t of traces) if (trace(t.from, t.to)) whole.add(t.transactionHash);
+    }
+    const logs = batch.logs.filter((l) => whole.has(l.transactionHash) || plainLog(l));
+    const ofLogs = new Set(query.includeLogTransactions ? logs.filter(plainLog).map((l) => l.transactionHash) : []);
+    const transactions = batch.transactions.filter((t) => whole.has(t.hash) || ofLogs.has(t.hash) || tx(t.from, t.to));
+    const matchedTraces = traces.filter((t) => whole.has(t.transactionHash) || trace(t.from, t.to));
+    const used = new Set([...logs, ...transactions, ...matchedTraces].map((x) => x.blockNumber));
+    return { ...batch, blocks: batch.blocks.filter((b) => used.has(b.number)), transactions, logs, traces: matchedTraces };
+  };
 }
 
-/** `matchEvmBatch` over every batch of a `wholeBlocksQuery(query)` fetch. */
-export async function* matchEvmBatches(batches: AsyncIterable<EvmBatch>, query: EvmQuery): AsyncGenerator<EvmBatch> {
-  for await (const batch of batches) yield matchEvmBatch(batch, query);
+/** A matcher over every batch of a `wholeBlocksQuery(query)` fetch. */
+export async function* matchEvmBatches(batches: AsyncIterable<EvmBatch>, match: (batch: EvmBatch) => EvmBatch): AsyncGenerator<EvmBatch> {
+  for await (const batch of batches) yield match(batch);
 }
 
 /**

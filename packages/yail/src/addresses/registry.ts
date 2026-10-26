@@ -30,6 +30,8 @@ function key(set: string, chain: string, address: string): string {
 export class AddressRegistry {
   private rows = new Map<string, AddressRow>();
   private loadedAt: number | undefined;
+  private versions = new Map<string, number>();
+  private memo = new Map<string, { version: number; value: unknown }>();
   private listeners = new Set<(row: AddressRow) => void>();
 
   constructor(private readonly db: Db, private readonly normalize: (chain: string, address: string) => string) {}
@@ -46,9 +48,29 @@ export class AddressRegistry {
     for (const r of rows) {
       const k = key(r.set, r.chain, r.address);
       const existing = this.rows.get(k);
-      if (existing && existing.updatedAt.getTime() > r.updatedAt.getTime()) continue;
-      this.rows.set(k, r);
+      if (existing && existing.updatedAt.getTime() >= r.updatedAt.getTime()) continue;
+      this.put(r);
     }
+  }
+
+  /** Bumped whenever a row of the chain changes: what `live` and `unadopted` answer stays the same until then. */
+  version(chain: string): number {
+    return this.versions.get(chain) ?? 0;
+  }
+
+  private put(row: AddressRow): void {
+    this.rows.set(key(row.set, row.chain, row.address), row);
+    this.versions.set(row.chain, this.version(row.chain) + 1);
+  }
+
+  /** Every live poll asks again; with hundreds of thousands of rows, answer from the last scan while the chain's rows are unchanged. */
+  private memoized<T>(chain: string, name: string, compute: () => T): T {
+    const k = key(name, chain, "");
+    const hit = this.memo.get(k);
+    if (hit?.version === this.version(chain)) return hit.value as T;
+    const value = compute();
+    this.memo.set(k, { version: this.version(chain), value });
+    return value;
   }
 
   /**
@@ -76,12 +98,14 @@ export class AddressRegistry {
   }
 
   /** Addresses the live loop should include for a set on a chain: everything adopted, and failed addresses registered again (live since they were first adopted). */
-  live(set: string, chain: string): string[] {
-    const out: string[] = [];
-    for (const r of this.rows.values()) {
-      if (r.set === set && r.chain === chain && (r.adopted || r.adoptedAtBlock > 0n)) out.push(r.address);
-    }
-    return out.sort(); // deterministic order: query shapes (and cache keys) must not depend on load order
+  live(set: string, chain: string): readonly string[] {
+    return this.memoized(chain, `live:${set}`, () => {
+      const out: string[] = [];
+      for (const r of this.rows.values()) {
+        if (r.set === set && r.chain === chain && (r.adopted || r.adoptedAtBlock > 0n)) out.push(r.address);
+      }
+      return out.sort(); // deterministic order: query shapes (and cache keys) must not depend on load order
+    });
   }
 
   list(filter: { set?: string; chain?: string; status?: AddressStatus } = {}): AddressRow[] {
@@ -91,8 +115,8 @@ export class AddressRegistry {
   }
 
   /** Newly registered addresses on a chain not yet adopted by the live loop. */
-  unadopted(chain: string): AddressRow[] {
-    return [...this.rows.values()].filter((r) => r.chain === chain && !r.adopted && r.status === "pending");
+  unadopted(chain: string): readonly AddressRow[] {
+    return this.memoized(chain, "unadopted", () => [...this.rows.values()].filter((r) => r.chain === chain && !r.adopted && r.status === "pending"));
   }
 
   async register(input: RegisterInput | RegisterInput[]): Promise<AddressRow[]> {
@@ -119,7 +143,7 @@ export class AddressRegistry {
         registeredAt: existing?.registeredAt ?? now,
         updatedAt: now,
       };
-      this.rows.set(key(row.set, row.chain, row.address), row);
+      this.put(row);
       out.push(row);
     }
     const fresh = out.filter((r) => r.updatedAt === now);
@@ -133,7 +157,7 @@ export class AddressRegistry {
     const existing = this.rows.get(k);
     if (!existing) throw new Error(`address ${address} not registered in set ${set} on ${chain}`);
     const row: AddressRow = { ...existing, ...patch, updatedAt: new Date() };
-    this.rows.set(k, row);
+    this.put(row);
     await this.db.insert(addressesTable).values(row);
     for (const l of this.listeners) l(row);
     return row;
@@ -143,7 +167,7 @@ export class AddressRegistry {
     if (rows.length === 0) return;
     const now = new Date();
     const updated = rows.map((r) => ({ ...r, ...patch, updatedAt: now }));
-    for (const r of updated) this.rows.set(key(r.set, r.chain, r.address), r);
+    for (const r of updated) this.put(r);
     await this.db.insert(addressesTable).values(updated);
     for (const r of updated) for (const l of this.listeners) l(r);
   }

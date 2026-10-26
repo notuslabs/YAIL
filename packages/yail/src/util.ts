@@ -10,7 +10,7 @@ export function append<T>(target: T[], items: readonly T[]): void {
 }
 
 /** Split a list into consecutive slices of at most `size` items. */
-export function chunkList<T>(list: T[], size: number): T[][] {
+export function chunkList<T>(list: readonly T[], size: number): T[][] {
   if (list.length === 0) return [];
   const out: T[][] = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
