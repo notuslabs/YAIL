@@ -3,7 +3,7 @@ export { logOrder, txOrder } from "./types.js";
 export { hypersync, toHypersyncQuery } from "./hypersync.js";
 export type { HypersyncOptions, SolanaHypersyncOptions } from "./hypersync.js";
 export { rpc } from "./rpc.js";
-export type { RpcSourceOptions, SolanaRpcOptions } from "./rpc.js";
+export type { RpcSourceOptions, SolanaRpcOptions, BitcoinRpcOptions } from "./rpc.js";
 export { helius } from "./solana/helius.js";
 export type { HeliusOptions } from "./solana/helius.js";
 export { cached, hashQuery } from "./cached.js";
