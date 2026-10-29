@@ -1,7 +1,7 @@
 import { isMaterializedView, isTable, isView, materializedViewDdl, materializedViewPopulateSql, tableDdl, viewDdl, type MaterializedView, type Table, type View } from "../schema/index.js";
 import type { Db } from "./client.js";
 import { INTERNAL_TABLES } from "./internal.js";
-import { isSqlFragment, type SqlFragment } from "./sql.js";
+import { isSqlFragment, renderSql, sql, type SqlFragment } from "./sql.js";
 
 export type SchemaModule = Record<string, unknown>;
 
@@ -94,9 +94,14 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Schem
     await db.command(tableDdl(t, db.database));
   }
   for (const v of views) {
+    const ddl = materializedViewDdl(v, db.database);
+    if (v.refresh && (await isLive(db, v, ddl))) {
+      log(`keep materialized view ${v.name}`);
+      continue;
+    }
     log(`create materialized view ${v.name}`);
     if (v.refresh) await db.command(`DROP VIEW IF EXISTS \`${db.database}\`.\`${v.name}\``);
-    await db.command(materializedViewDdl(v, db.database));
+    await db.command(ddl);
   }
   for (const v of plainViews) {
     log(`create view ${v.name}`);
@@ -108,6 +113,22 @@ export async function migrate(db: Db, schema: SchemaModule | ReadonlyArray<Schem
       await db.command(materializedViewPopulateSql(v, db.database));
     }
   }
+}
+
+/**
+ * Whether the server already runs this view as `ddl` would create it. Both sides are ClickHouse's own formatting: the
+ * stored definition adds the target's columns and a DEFINER after the `TO` target, so it must open with the formatted
+ * `ddl` up to its query, and its `as_select` must equal the formatted query.
+ */
+async function isLive(db: Db, view: MaterializedView, ddl: string): Promise<boolean> {
+  const { text } = renderSql(view.query, { inline: true, database: db.database });
+  const [live] = await db.query<{ create_table_query: string; as_select: string; ddl: string; query: string }>(sql`
+    SELECT create_table_query, as_select, formatQuerySingleLine(${ddl}) AS ddl, formatQuerySingleLine(${text}) AS query
+    FROM system.tables
+    WHERE database = ${db.database} AND name = ${view.name}`);
+  if (!live) return false;
+  const head = live.ddl.replace(" IF NOT EXISTS", "").slice(0, -` AS ${live.query}`.length);
+  return live.as_select === live.query && live.create_table_query.startsWith(`${head} `);
 }
 
 /** Ordered DDL statements, useful for review or applying with another tool. */
