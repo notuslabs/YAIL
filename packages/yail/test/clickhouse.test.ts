@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestClickHouse, type TestClickHouse } from "../src/testing/index.js";
 import { createDb, type Db } from "../src/db/client.js";
 import { migrate } from "../src/db/migrate.js";
-import { sql } from "../src/db/sql.js";
+import { sql, type SqlFragment } from "../src/db/sql.js";
 import { t, table, materializedView, view } from "../src/schema/index.js";
 import { BatchWriter } from "../src/db/batch.js";
 import { CacheRunner, seedCache } from "../src/cache/cached.js";
@@ -96,6 +96,33 @@ describe("clickhouse", () => {
     expect(await db.query(sql`SELECT wallet, amount FROM ${balances}`)).toEqual([{ wallet: "0xaaa", amount: "8" }]);
     expect(await db.query(sql`SELECT wallet FROM ${positive}`)).toEqual([{ wallet: "0xaaa" }]);
     await migrate(db, { positive, events, totals, totalsMv, balances }); // re-running migrate replaces the views in place
+  });
+
+  it("keeps an unchanged refreshable view across migrates, and recreates it when its query or schedule changes", async () => {
+    const own = createDb(ch.database());
+    const counts = table("counts", { n: t.uint64() }, { orderBy: ["n"], indexMeta: false });
+    const countsMv = (query: SqlFragment, schedule: string) => materializedView("counts_mv", { from: events, to: counts, query, refresh: { schedule, append: true } });
+    const positiveCount = sql`SELECT count() AS n FROM ${events} WHERE amount > ${0n}`;
+    const live = () => own.query<{ uuid: string; as_select: string }>(sql`SELECT uuid, as_select FROM system.tables WHERE database = ${own.database} AND name = 'counts_mv'`);
+    const refreshes = () => own.query(sql`SELECT uuid, last_success_time, next_refresh_time FROM system.view_refreshes WHERE database = ${own.database}`);
+
+    await migrate(own, { events, counts, countsMv: countsMv(positiveCount, "EVERY 1 HOUR OFFSET 12 MINUTE") });
+    await own.command(`SYSTEM WAIT VIEW \`${own.database}\`.counts_mv`);
+    const [created] = await live();
+    const [refreshed] = await refreshes();
+    await migrate(own, { events, counts, countsMv: countsMv(positiveCount, "EVERY 1 HOUR OFFSET 12 MINUTE") });
+    expect(await live()).toEqual([created]);
+    expect(await refreshes()).toEqual([refreshed]);
+
+    await migrate(own, { events, counts, countsMv: countsMv(sql`SELECT count() AS n FROM ${events}`, "EVERY 1 HOUR OFFSET 12 MINUTE") });
+    const [requeried] = await live();
+    expect(requeried!.uuid).not.toBe(created!.uuid);
+    expect(requeried!.as_select).toBe(`SELECT count() AS n FROM ${own.database}.events`);
+
+    await migrate(own, { events, counts, countsMv: countsMv(sql`SELECT count() AS n FROM ${events}`, "EVERY 2 HOUR") });
+    const [rescheduled] = await live();
+    expect(rescheduled!.uuid).not.toBe(requeried!.uuid);
+    await own.close();
   });
 
   it("populates a view's target by column name, whatever order its query selects them in", async () => {

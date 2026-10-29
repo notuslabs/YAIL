@@ -43,7 +43,7 @@ export function tableDdl(table: Table<any>, database?: string): string {
   return parts.join("\n");
 }
 
-/** A refreshable view is dropped and recreated by `migrate` so a changed query or schedule applies; its target table keeps its data. */
+/** `migrate` drops and recreates a refreshable view only when its query, schedule or target changed; its target table keeps its data. */
 export function materializedViewDdl(view: MaterializedView, database?: string): string {
   const { text } = renderSql(view.query, { inline: true, database });
   const refresh = view.refresh;
