@@ -28,6 +28,8 @@ export interface CachedClient {
 export interface CachedClientOptions {
   chain: string;
   url: string;
+  /** viem's `maxResponseBodySize`. Default: 10 MiB. */
+  maxResponseBytes?: number;
   db?: Db;
   persist?: boolean;
   onCache?: (hit: boolean) => void;
@@ -36,7 +38,7 @@ export interface CachedClientOptions {
 }
 
 export function createCachedClient(options: CachedClientOptions): CachedClient {
-  const raw = createPublicClient({ transport: http(options.url, { batch: true, retryCount: 4 }) });
+  const raw = createPublicClient({ transport: http(options.url, { batch: true, retryCount: 4, maxResponseBodySize: options.maxResponseBytes }) });
   const persist = options.persist !== false && options.db !== undefined;
   const memory = new Map<string, string>();
 

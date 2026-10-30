@@ -16,6 +16,9 @@ import { append } from "../src/util.js";
 import type { Db } from "../src/db/client.js";
 import { CacheRunner } from "../src/cache/cached.js";
 import { memory } from "../src/cache/stores.js";
+import { createCachedClient } from "../src/rpc/cached-client.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 const erc20 = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)", "event Approval(address indexed owner, address indexed spender, uint256 value)"]);
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -352,4 +355,23 @@ describe("config validation", () => {
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: solana } } })).toThrow(/backfillSource .* is a solana source, source .* is evm/);
     expect(() => createConfig({ database: { url: "http://x" }, chains: { base: { id: 1, source: evm, backfillSource: evm } } })).not.toThrow();
   });
+});
+
+describe("cached client", () => {
+  it("accepts an RPC response past viem's 10 MiB cap when rpcMaxResponseBytes allows it", async () => {
+    const result = "0x" + "ab".repeat(6 * 2 ** 20);
+    const server = createServer(async (request, response) => {
+      const calls: Array<{ id: number }> = [JSON.parse(Buffer.concat(await request.toArray()).toString())].flat();
+      response.end(JSON.stringify(calls.map(({ id }) => ({ jsonrpc: "2.0", id, result }))));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const trace = { method: "debug_traceTransaction", params: ["0x01"] } as const;
+    try {
+      await expect(createCachedClient({ chain: "bnb", url }).raw.request(trace as any)).rejects.toThrow(/exceeded the size limit/);
+      await expect(createCachedClient({ chain: "bnb", url, maxResponseBytes: 64 * 2 ** 20 }).raw.request(trace as any)).resolves.toBe(result);
+    } finally {
+      server.close();
+    }
+  }, 30_000);
 });
