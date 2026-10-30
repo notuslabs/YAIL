@@ -378,7 +378,7 @@ startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:
 ```
 Set `observability.otlpEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to ship logs over OTLP too, and `observability.logsToClickHouse: true` to keep them in `_yail_logs` next to your data (zero extra infrastructure). Recent events are always available at `GET /_evlog/logs`.
 
-HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` counts the requests each chain's sources sent (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains): every HTTP attempt, retries included, except for EVM `hypersync()`, which counts its client's calls and stream responses and cannot see the retries the client makes on its own (`maxNumRetries`). A source of your own reports them through `onRequest`.
+HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` has the process's `memory` (`process.memoryUsage()`, bytes) and counts the requests each chain's sources sent (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains): every HTTP attempt, retries included, except for EVM `hypersync()` reading through its client, which counts the client's calls and stream responses and cannot see the retries the client makes on its own (`maxNumRetries`); its Arrow reads near the head count every attempt. A source of your own reports them through `onRequest`.
 
 ### Testing with real data
 

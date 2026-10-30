@@ -32,6 +32,8 @@ export interface StatusSnapshot {
   chains: Record<string, ChainStats & { running: boolean; error?: string; pendingJobs: number }>;
   addresses: Array<{ set: string; chain: string; status: string; count: number }>;
   counters: Record<string, number>;
+  /** The process's `process.memoryUsage()`, in bytes. */
+  memory: NodeJS.MemoryUsage;
 }
 
 export interface ReindexRequest {
@@ -301,7 +303,7 @@ export function createIndexer<C extends Config<any, any, any>>(options: IndexerO
         const s = snap.chains[name] ?? { cursor: r.cursor, head: r.head, finalized: r.finalized, lagBlocks: 0, blocksIndexed: 0, eventsProcessed: 0, batches: 0, errors: 0, sourceRequests: 0, lastBatchMs: 0, caughtUp: r.caughtUp };
         chains[name] = { ...s, cursor: r.cursor, head: r.head, finalized: r.finalized, caughtUp: r.caughtUp, running: r.running, error: r.error?.message, pendingJobs: jobRunners.get(name)?.pending ?? 0 };
       }
-      return { chains, addresses: await need(registry, "addresses").counts(), counters: snap.counters };
+      return { chains, addresses: await need(registry, "addresses").counts(), counters: snap.counters, memory: process.memoryUsage() };
     },
   };
   return indexer;

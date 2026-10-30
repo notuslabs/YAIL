@@ -276,6 +276,7 @@ describe("indexer end-to-end (synthetic fixture)", () => {
     const status = await indexer.status();
     expect(status.chains.test!.cursor).toBe(111); // height 120 - finality 10 => finalized 110, cursor = 111
     expect(status.chains.test!.caughtUp).toBe(true);
+    expect(status.memory.heapUsed).toBeGreaterThan(0);
     expect(await balances(indexer)).toEqual({
       [W1]: { total: 100n - 40n + 2n, n: 3 },
       [W2]: { total: 40n - 1n, n: 2 },
