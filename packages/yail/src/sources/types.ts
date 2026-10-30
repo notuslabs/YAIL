@@ -398,6 +398,8 @@ export function txOrder(a: EvmTransaction, b: EvmTransaction): number {
   return a.blockNumber - b.blockNumber || a.transactionIndex - b.transactionIndex;
 }
 
+/** `s` lowercase, `s` itself when it already is: `toLowerCase()` copies every string, and the head matchers hold hundreds of thousands. */
 export function lower(s: string): string {
-  return s.toLowerCase();
+  if (/[A-Z\u0080-\uffff]/.test(s)) return s.toLowerCase();
+  return s;
 }
