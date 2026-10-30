@@ -5,8 +5,16 @@
  * batches of blocks/transactions/logs for a block range.
  */
 
+import type { EvmMatcher } from "./match.js";
+
 export interface FetchOptions {
   signal?: AbortSignal;
+  /**
+   * Set with a whole-blocks query (`wholeBlocksQuery`): what its batches will be matched with. A source may apply it as
+   * it reads, keeping only the matched items, so a range's whole blocks are never held at once. Matching again is a
+   * no-op, so a source that ignores it answers the same.
+   */
+  match?: EvmMatcher;
 }
 
 interface SourceBase {
@@ -390,6 +398,8 @@ export function txOrder(a: EvmTransaction, b: EvmTransaction): number {
   return a.blockNumber - b.blockNumber || a.transactionIndex - b.transactionIndex;
 }
 
+/** `s` lowercase, `s` itself when it already is: `toLowerCase()` copies every string, and the head matchers hold hundreds of thousands. */
 export function lower(s: string): string {
-  return s.toLowerCase();
+  if (/[A-Z\u0080-\uffff]/.test(s)) return s.toLowerCase();
+  return s;
 }

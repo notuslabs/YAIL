@@ -276,6 +276,7 @@ describe("indexer end-to-end (synthetic fixture)", () => {
     const status = await indexer.status();
     expect(status.chains.test!.cursor).toBe(111); // height 120 - finality 10 => finalized 110, cursor = 111
     expect(status.chains.test!.caughtUp).toBe(true);
+    expect(status.memory.heapUsed).toBeGreaterThan(0);
     expect(await balances(indexer)).toEqual({
       [W1]: { total: 100n - 40n + 2n, n: 3 },
       [W2]: { total: 40n - 1n, n: 2 },
@@ -433,6 +434,21 @@ describe("whole blocks near the head", () => {
     fixture.height = 140;
     await runner.runLoop({ once: true });
     expect((await indexer.db.rows(ledger, sql`WHERE wallet = ${W3}`)).map((r) => [r.block, r.mode])).toEqual([[125n, "live"]]);
+    await indexer.db.close();
+  });
+
+  it("matches a factory child in the responses after the one that created it", async () => {
+    const fb = fixtureBuilder(120);
+    fb.transfer(60, POOL_A, addr(0x10), addr(0x11), 5n); // POOL_A is created at 40, two 25-block responses earlier
+    const { indexer } = makeIndexer(ch.database(), { fixture: fb.build(), source: fixtureSource(fb.build(), { blocksPerBatch: 25 }), wholeBlocksWithin: 1_000 });
+    await indexer.run();
+    const pools = await indexer.db.rows(poolEvents, sql`ORDER BY pool, _yail_block, log_index`);
+    expect(pools.map((r) => [r.pool, r.value])).toEqual([
+      [POOL_A, 1n],
+      [POOL_A, 2n],
+      [POOL_A, 5n],
+      [POOL_B, 4n],
+    ]);
     await indexer.db.close();
   });
 

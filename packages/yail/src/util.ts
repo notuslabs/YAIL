@@ -1,3 +1,5 @@
+import { lower } from "./sources/types.js";
+
 /** Wrap a single value in an array; copy an array. */
 export function toArray<T>(value: T | readonly T[]): T[] {
   if (Array.isArray(value)) return [...(value as readonly T[])];
@@ -25,7 +27,7 @@ export function bigintReplacer(_key: string, value: unknown): unknown {
 
 /** Lowercase a hex string, or null when absent. */
 export function lowerOrNull(value: string | null | undefined): string | null {
-  if (value) return value.toLowerCase();
+  if (value) return lower(value);
   return null;
 }
 

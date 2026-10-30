@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseAbi } from "viem";
+import { decodeEventLog, encodeAbiParameters, parseAbi, toEventSelector, type AbiEvent, type Hex } from "viem";
 import { t, table, materializedView, tableDdl, materializedViewDdl, materializedViewPopulateSql, view, viewDdl } from "../src/schema/index.js";
 import { sql, renderSql } from "../src/db/sql.js";
 import { serializeRow, deserializeRow } from "../src/db/serialize.js";
 import { createConfig, addressSet, factory } from "../src/config/index.js";
 import { buildPlans, buildEvmQuery, nextBoundary } from "../src/indexer/plan.js";
 import { AddressRegistry } from "../src/addresses/registry.js";
-import { compileFilter, logMatchesFilter, padAddress } from "../src/indexer/events.js";
+import { compileFilter, decodeLog, logMatchesFilter, padAddress } from "../src/indexer/events.js";
 import { fixtureSource, matchesLogFilters } from "../src/sources/fixture.js";
 import { hashQuery } from "../src/sources/cached.js";
 import { matchEvmBatch, wholeBlocksQuery } from "../src/sources/match.js";
@@ -243,6 +243,43 @@ describe("plan", () => {
     const c = hashQuery({ fromBlock: 5, toBlock: 9, logs: [{ address: ["0xcd"] }], transactions: [] } as any);
     expect(a).toBe(b);
     expect(a).not.toBe(c);
+  });
+});
+
+describe("decodeLog", () => {
+  const events = parseAbi([
+    "event Transfer(address indexed from, address indexed to, uint256 value)",
+    "event Unnamed(address indexed, uint256, bool indexed)",
+    "event Mixed(string indexed label, bytes32 indexed id, uint256[] amounts, (address who, uint128 amount) entry)",
+    "event Empty()",
+  ]);
+  const word = (n: bigint) => encodeAbiParameters([{ type: "uint256" }], [n]);
+  const who = padAddress(addr(0x42));
+  const logOf = (event: AbiEvent, topics: string[], data: string) => ({ blockNumber: 1, transactionHash: "0x01", transactionIndex: 0, logIndex: 0, address: addr(0x1), data, topics: [toEventSelector(event), ...topics] });
+  const viem = (event: AbiEvent, log: { topics: string[]; data: string }) => {
+    try {
+      return { args: decodeEventLog({ abi: [event], data: log.data as Hex, topics: log.topics as [Hex, ...Hex[]], strict: false }).args ?? {} };
+    } catch {
+      return null;
+    }
+  };
+  const [transfer, unnamed, mixed, empty] = events;
+  const cases = [
+    logOf(transfer, [who, who], word(7n)),
+    logOf(transfer, [who], encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [addr(0x43) as Hex, 9n])),
+    logOf(transfer, [who, who], "0x"),
+    logOf(transfer, [who, who], "0x1234"),
+    logOf(unnamed, [who, word(1n)], word(5n)),
+    logOf(unnamed, [who], encodeAbiParameters([{ type: "bool" }, { type: "uint256" }], [true, 5n])),
+    logOf(mixed, [word(1n), word(2n)], encodeAbiParameters([{ type: "uint256[]" }, { type: "tuple", components: [{ name: "who", type: "address" }, { name: "amount", type: "uint128" }] }], [[1n, 2n], { who: addr(0x44) as Hex, amount: 3n }])),
+    logOf(empty, [], "0x"),
+    { ...logOf(transfer, [who, who], word(7n)), topics: [toEventSelector(unnamed), who, who] },
+    { ...logOf(transfer, [who, who], word(7n)), topics: [] },
+  ];
+
+  it.each(cases.map((log, i) => [i, log] as const))("decodes case %i the way viem's decodeEventLog does", (_, log) => {
+    const event = events.find((e) => toEventSelector(e) === log.topics[0]) ?? transfer;
+    expect(decodeLog(event, log)).toEqual(viem(event, log));
   });
 });
 

@@ -28,6 +28,11 @@ export function cached<S extends Source>(inner: S, options: CachedSourceOptions)
     getHeight: () => inner.getHeight(),
     onRequest: (listener: () => void) => inner.onRequest?.(listener) ?? (() => {}),
     async *fetch(query: QueryOf<S>, fetchOptions?: FetchOptions): AsyncIterable<BatchOf<S>> {
+      // A source may answer a fetch with `match` with only the matched items: not the query's answer, so not cached.
+      if (fetchOptions?.match) {
+        yield* fetch(query, fetchOptions);
+        return;
+      }
       const queryHash = hashQuery(query);
       const cachedRanges = await options.db.query<{ from_block: string; next_block: string }>(
         sql`SELECT from_block, next_block FROM ${sourceCache} FINAL

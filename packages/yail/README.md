@@ -301,6 +301,14 @@ Measured on 2026-10-16, a 30 s poll at the head is one request per chain whateve
 base: { id: 8453, source: hypersync({ url, traces: { url: tracesUrl } }), pollInterval: 30_000, wholeBlocksWithin: 100 },
 ```
 
+`hypersync()` reads those whole blocks from HyperSync's Arrow API (`/query/arrow-ipc`) itself, ~4 MB a request and 4
+in flight, and filters each response column by column with the query's address Sets: only the matched rows ever become
+objects, so a range holds its matches plus the responses in flight, not its whole blocks. Measured on 2026-10-30
+against the client's `get()` (which builds every row of the range first) on 5-minute ranges: Base 713 → 136 MB peak
+heap and 9.5 → 2.4 s CPU, Polygon 466 → 101 MB and 4.0 → 1.3 s, the same rows. Retries and rate limits follow the
+client (`maxNumRetries`, waits on `x-ratelimit-reset`, shared by every chain using the token). `hypersync({ wholeBlocks:
+"get" })` goes back to the client. Needs Node 22.15 or later (zstd in `node:zlib`).
+
 On Bitcoin, `esplora()` scans one address history per address, so a block costs as many requests as there are
 addresses. With `wholeBlocksWithin`, live ranges near the head read each block's transactions instead, 25 per request
 (~150 requests a block on mempool.space): on block 971,773, 14 s for the same transactions that 208 address scans
@@ -370,7 +378,7 @@ startTelemetry({ serviceName: "wallet-ledger", endpoint: "http://otel-collector:
 ```
 Set `observability.otlpEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to ship logs over OTLP too, and `observability.logsToClickHouse: true` to keep them in `_yail_logs` next to your data (zero extra infrastructure). Recent events are always available at `GET /_evlog/logs`.
 
-HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` counts the requests each chain's sources sent (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains): every HTTP attempt, retries included, except for EVM `hypersync()`, which counts its client's calls and stream responses and cannot see the retries the client makes on its own (`maxNumRetries`). A source of your own reports them through `onRequest`.
+HTTP status API (`server.port`, default 42069): `/health`, `/ready` (caught up on every chain), `/status`, `/addresses`, `/reindex`, `/jobs`. `/status` has the process's `memory` (`process.memoryUsage()`, bytes) and counts the requests each chain's sources sent (`chains.<name>.sourceRequests`, and `counters.sourceRequests` for all chains): every HTTP attempt, retries included, except for EVM `hypersync()` reading through its client, which counts the client's calls and stream responses and cannot see the retries the client makes on its own (`maxNumRetries`); its Arrow reads near the head count every attempt. A source of your own reports them through `onRequest`.
 
 ### Testing with real data
 
