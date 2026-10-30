@@ -1,4 +1,4 @@
-import { decodeEventLog, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type ContractEventName, type DecodeEventLogReturnType } from "viem";
+import { decodeAbiParameters, encodeAbiParameters, toEventSelector, type Abi, type AbiEvent, type AbiParameter, type ContractEventName, type DecodeEventLogReturnType, type Hex } from "viem";
 import type { Config, EventFilter, ProgramConfig } from "../config/types.js";
 import type { BitcoinTransaction, EvmBlock, EvmLog, EvmTrace, EvmTransaction, SolanaBalance, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, StellarEvent, StellarLedger, StellarTransaction } from "../sources/types.js";
 import type { EventDef, InstructionDef } from "../solana/program.js";
@@ -242,13 +242,55 @@ export function unpadAddress(topic: string): string {
   return `0x${topic.slice(-40)}`.toLowerCase();
 }
 
+/**
+ * viem's `decodeEventLog({ abi: [event], strict: false })`, with the event's selector and inputs worked out once:
+ * viem hashes the event's signature on every call to find it in the ABI, ~30% of a decode.
+ */
 export function decodeLog(event: AbiEvent, log: EvmLog): { args: Record<string, unknown> } | null {
+  const decoder = decoderOf(event);
+  if (log.topics[0] !== decoder.selector) return null;
   try {
-    const decoded = decodeEventLog({ abi: [event], data: log.data as `0x${string}`, topics: log.topics as [`0x${string}`, ...`0x${string}`[]], strict: false });
-    return { args: (decoded.args ?? {}) as Record<string, unknown> };
+    return { args: decoder.decode(log) };
   } catch {
     return null;
   }
+}
+
+const decoders = new WeakMap<AbiEvent, { selector: string; decode: (log: EvmLog) => Record<string, unknown> }>();
+
+function decoderOf(event: AbiEvent) {
+  const known = decoders.get(event);
+  if (known) return known;
+  const unnamed = event.inputs.some((x) => !x.name);
+  const inputs = event.inputs.map((param, i) => ({ param, key: unnamed ? i : param.name || i }));
+  const indexed = inputs.filter((input) => input.param.indexed);
+  const rest = inputs.filter((input) => !input.param.indexed);
+  const decode = (log: EvmLog) => {
+    const args: Record<string | number, unknown> = {};
+    // As viem without strict: an indexed input with no topic is read from the data, before the other inputs.
+    const missing = indexed.filter((input, i) => {
+      const topic = log.topics[i + 1];
+      if (topic) args[input.key] = decodeTopic(input.param, topic as Hex);
+      return !topic;
+    });
+    const inData = [...missing, ...rest];
+    if (inData.length > 0 && log.data && log.data !== "0x") {
+      try {
+        const values = decodeAbiParameters(inData.map((input) => input.param), log.data as Hex);
+        inData.forEach((input, i) => (args[input.key] = values[i]));
+      } catch {}
+    }
+    if (Object.values(args).length === 0) return {};
+    return unnamed ? Object.assign(new Array<unknown>(), args) : args;
+  };
+  const decoder = { selector: toEventSelector(event), decode };
+  decoders.set(event, decoder);
+  return decoder;
+}
+
+function decodeTopic(param: AbiParameter, topic: Hex): unknown {
+  if (param.type === "string" || param.type === "bytes" || param.type === "tuple" || /^(.*)\[(\d+)?\]$/.test(param.type)) return topic;
+  return decodeAbiParameters([param], topic)[0];
 }
 
 /** Does a log satisfy a compiled filter? `inSet` resolves address-set membership. */
