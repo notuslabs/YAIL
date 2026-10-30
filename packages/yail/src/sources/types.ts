@@ -5,8 +5,16 @@
  * batches of blocks/transactions/logs for a block range.
  */
 
+import type { EvmMatcher } from "./match.js";
+
 export interface FetchOptions {
   signal?: AbortSignal;
+  /**
+   * Set with a whole-blocks query (`wholeBlocksQuery`): what its batches will be matched with. A source may apply it as
+   * it reads, keeping only the matched items, so a range's whole blocks are never held at once. Matching again is a
+   * no-op, so a source that ignores it answers the same.
+   */
+  match?: EvmMatcher;
 }
 
 interface SourceBase {

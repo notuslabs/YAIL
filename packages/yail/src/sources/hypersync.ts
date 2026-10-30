@@ -3,6 +3,7 @@ import type { EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTran
 import { logOrder, lower, txOrder } from "./types.js";
 import { append, lowerOrNull, requestListeners } from "../util.js";
 import { solanaHypersync, type SolanaHypersyncOptions } from "./solana/hypersync.js";
+import { arrowWholeBlocks } from "./hypersync-arrow.js";
 
 export type { SolanaHypersyncOptions };
 
@@ -34,6 +35,12 @@ export interface HypersyncOptions {
   streamThreshold?: number;
   /** Target response size hint for the stream API. Default 400k. */
   responseBytesTarget?: number;
+  /**
+   * How whole blocks near the head (`wholeBlocksWithin`) are read. "arrow" (default): HyperSync's Arrow API read
+   * directly, ~4 MB a request, 4 in flight, each response filtered column by column so only matched items are ever
+   * built. "get": the client's `get()`, every item of each response built, then matched; a fallback.
+   */
+  wholeBlocks?: "arrow" | "get";
 }
 
 const BLOCK_FIELDS = ["Number", "Hash", "ParentHash", "Timestamp"] as const;
@@ -54,13 +61,18 @@ export function hypersync(options: HypersyncOptions | SolanaHypersyncOptions): E
 
 function evmHypersync(options: HypersyncOptions): EvmSource {
   const clients = new Map<string, HypersyncClient>();
+  const estimates = new Map<string, { bytesPerBlock: number }>();
   const listeners = requestListeners();
-  const getClient = (url = options.url) => {
-    // Resolved lazily so `yail ddl` / `yail migrate` work without a token.
+  // Resolved lazily so `yail ddl` / `yail migrate` work without a token.
+  const getApiToken = (url: string) => {
     const apiToken = options.apiToken ?? process.env.ENVIO_API_TOKEN;
     if (!apiToken) {
       throw new Error(`hypersync(${url}): missing apiToken. Pass it explicitly or set ENVIO_API_TOKEN (https://app.envio.dev/api-tokens).`);
     }
+    return apiToken;
+  };
+  const getClient = (url = options.url) => {
+    const apiToken = getApiToken(url);
     let client = clients.get(url);
     if (!client) {
       const caching = options.queryCaching ?? true;
@@ -91,6 +103,13 @@ function evmHypersync(options: HypersyncOptions): EvmSource {
 
   async function* fetchFrom(url: string, query: EvmQuery, withTraces: boolean, fetchOptions?: FetchOptions): AsyncGenerator<EvmBatch> {
     const hsQuery = toHypersyncQuery(query, withTraces);
+    if (fetchOptions?.match && (options.wholeBlocks ?? "arrow") === "arrow") {
+      const estimate = estimates.get(url) ?? { bytesPerBlock: 0 };
+      estimates.set(url, estimate);
+      const arrowOptions = { url, apiToken: getApiToken(url), maxNumRetries: options.maxNumRetries ?? 12, httpReqTimeoutMillis: options.httpReqTimeoutMillis ?? 120_000, onRequest: listeners.count, estimate };
+      yield await arrowWholeBlocks(query, hsQuery, fetchOptions.match, arrowOptions, fetchOptions.signal);
+      return;
+    }
     const span = query.toBlock - query.fromBlock;
     const threshold = options.streamThreshold ?? 5000;
     if (span >= threshold) {

@@ -10,7 +10,7 @@ import type { Observability, WideLogger } from "../observability/logger.js";
 import { createError } from "evlog";
 import type { BitcoinBatch, StellarBatch, EvmBatch, EvmBlock, EvmLog, EvmQuery, EvmSource, EvmTrace, EvmTransaction, SolanaBalance, SolanaBatch, SolanaBlock, SolanaInstruction, SolanaLog, SolanaTransaction, Source } from "../sources/types.js";
 import { logOrder } from "../sources/types.js";
-import { evmMatcher, matchEvmBatches, wholeBlocksQuery } from "../sources/match.js";
+import { evmMatcher, matchEvmBatches, wholeBlocksQuery, type EvmMatcher } from "../sources/match.js";
 import { isAddressSet, isFactory } from "../config/address.js";
 import type { Config } from "../config/types.js";
 import { createContext, type ContextDeps, type HandlerContext } from "./context.js";
@@ -313,7 +313,8 @@ export class ChainRunner {
       const atHead = this.nearHead(live, from) && !options.override ? this.headQuery(from, to, addressChunk) : undefined;
       const q = atHead?.query ?? buildEvmQuery(this.plan, from, to, this.deps.registry, { override: options.override, addressChunk });
       fetchBatches = () => source.fetch(q, { signal: options.signal });
-      if (atHead) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal }), atHead.match);
+      // Matched with the registry of each batch: a factory child registered by one batch is matched in the next.
+      if (atHead) fetchBatches = () => matchEvmBatches(source.fetch(wholeBlocksQuery(q), { signal: options.signal, match: atHead.match }), (batch) => this.headQuery(batch.fromBlock, batch.nextBlock, addressChunk).match(batch));
       empty = q.logs.length === 0 && q.transactions.length === 0;
     } else if (source.kind === "solana") {
       const q = buildSolanaQuery(this.plan, from, to, this.deps.registry, { override: options.override });
@@ -395,13 +396,13 @@ export class ChainRunner {
     return live && this.wholeBlocksWithin !== undefined && this.head - from <= this.wholeBlocksWithin;
   }
 
-  private headMatch: { key: string; query: EvmQuery; match: (batch: EvmBatch) => EvmBatch } | undefined;
+  private headMatch: { key: string; query: EvmQuery; match: EvmMatcher } | undefined;
 
   /**
    * Near the head every poll filters whole blocks with the same query: it and its matcher are built again only when
    * the chain's addresses or the active sources change, so a poll costs what its blocks hold, not what the registry does.
    */
-  private headQuery(from: number, to: number, addressChunk: number): { query: EvmQuery; match: (batch: EvmBatch) => EvmBatch } {
+  private headQuery(from: number, to: number, addressChunk: number): { query: EvmQuery; match: EvmMatcher } {
     const active = [...this.plan.contracts, ...this.plan.accounts].filter((s) => activeIn(s, from, to)).map((s) => s.name);
     const key = `${this.deps.registry.version(this.chain)}:${active.join()}`;
     if (this.headMatch?.key !== key) {
