@@ -120,6 +120,7 @@ export class ChainRunner {
       this.client = createCachedClient({
         chain: plan.chain,
         url: cfg.rpc,
+        maxResponseBytes: cfg.rpcMaxResponseBytes,
         db: deps.db,
         persist: deps.config.cache?.rpc !== false,
         onCache: (hit) => deps.obs.metrics.recordCache("rpc", hit),

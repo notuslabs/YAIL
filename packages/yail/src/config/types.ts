@@ -19,6 +19,8 @@ export interface ChainConfig<S extends Source = Source> {
   backfillSource?: S;
   /** Optional JSON-RPC URL, enables `context.client.readContract` (EVM only). */
   rpc?: string;
+  /** Largest `rpc` response accepted, in bytes. Default: viem's 10 MiB, which a `callTracer` trace of a busy block can pass. */
+  rpcMaxResponseBytes?: number;
   /** Blocks behind the source head treated as final. Default: 20 (EVM), 3 (Bitcoin), 32 slots (Solana), 0 (Stellar). */
   finality?: number;
   /** Poll interval in ms once caught up. Default: 2000 (EVM), 30000 (Bitcoin). */
